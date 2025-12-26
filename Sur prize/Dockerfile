@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Build stage
-FROM ubuntu:25.10 AS build
+FROM ubuntu:24.04 AS build
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential binutils ca-certificates \
@@ -11,7 +11,7 @@ COPY Makefile vuln.c ./
 RUN make
 
 # Runtime stage
-FROM ubuntu:25.10
+FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install socat for TCP service and tini as init
