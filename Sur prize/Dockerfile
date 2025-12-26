@@ -20,7 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Create user and directories
-RUN useradd -m -u 1000 -s /usr/sbin/nologin ctf \
+RUN userdel -r $(getent passwd 1000 | cut -d: -f1) 2>/dev/null || true \
+    && useradd -m -u 1000 -s /usr/sbin/nologin ctf \
     && mkdir -p /home/ctf \
     && chown -R root:ctf /home/ctf
 
