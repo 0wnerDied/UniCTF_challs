@@ -1,0 +1,11 @@
+# Ignore everything by default
+*
+
+# Only allow specific files needed for build
+!Makefile
+!vuln.c
+!start.sh
+
+# If have headers or libraries
+# !*.h
+# !lib/*.so
