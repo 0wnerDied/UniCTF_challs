@@ -1,0 +1,6 @@
+# Ignore everything by default
+*
+
+# Only allow specific files needed for build
+!app.py
+!start.sh

@@ -1,0 +1,605 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+from pwn import *
+from collections import deque
+import time, os, pickle
+
+# ======================
+# config
+# ======================
+context.log_level = "info"
+CACHE_FILE = "cube2x2_tables.pkl"
+
+# ----------------------------
+# 2x2 corner model definitions
+# ----------------------------
+
+URF, UFL, ULB, UBR, DFR, DLF, DBL, DRB = range(8)
+
+CUBIES = [
+    ("U", "R", "F"),  # 0 URF
+    ("U", "F", "L"),  # 1 UFL
+    ("U", "L", "B"),  # 2 ULB
+    ("U", "B", "R"),  # 3 UBR
+    ("D", "F", "R"),  # 4 DFR
+    ("D", "L", "F"),  # 5 DLF
+    ("D", "B", "L"),  # 6 DBL
+    ("D", "R", "B"),  # 7 DRB
+]
+CUBIE_SET = [frozenset(x) for x in CUBIES]
+
+CORNER_FACES = {
+    URF: ("U", "R", "F"),
+    UFL: ("U", "F", "L"),
+    ULB: ("U", "L", "B"),
+    UBR: ("U", "B", "R"),
+    DFR: ("D", "F", "R"),
+    DLF: ("D", "L", "F"),
+    DBL: ("D", "B", "L"),
+    DRB: ("D", "R", "B"),
+}
+
+# MUST match server printed facelet layout (r,c).
+# 如果你之前已经能跑通，就不要改它。
+CORNER_FACELETS = {
+    URF: {"U": (1, 1), "R": (0, 0), "F": (0, 1)},
+    UFL: {"U": (1, 0), "F": (0, 0), "L": (0, 1)},
+    ULB: {"U": (0, 0), "L": (0, 0), "B": (0, 1)},
+    UBR: {"U": (0, 1), "B": (0, 0), "R": (0, 1)},
+    DFR: {"D": (0, 1), "F": (1, 1), "R": (1, 0)},
+    DLF: {"D": (0, 0), "L": (1, 1), "F": (1, 0)},
+    DBL: {"D": (1, 0), "B": (1, 1), "L": (1, 0)},
+    DRB: {"D": (1, 1), "R": (1, 1), "B": (1, 0)},
+}
+
+MOVES = ["U","U'","U2","D","D'","D2","F","F'","F2","B","B'","B2","L","L'","L2","R","R'","R2"]
+MOVE_INDEX = {m:i for i,m in enumerate(MOVES)}
+
+# 按 face 扩展（优化 IDA* 分支）
+FACES = ["U","D","F","B","L","R"]
+MOVES_BY_FACE = {
+    "U": ["U", "U2", "U'"],
+    "D": ["D", "D2", "D'"],
+    "F": ["F", "F2", "F'"],
+    "B": ["B", "B2", "B'"],
+    "L": ["L", "L2", "L'"],
+    "R": ["R", "R2", "R'"],
+}
+
+def inv_move(m):
+    if m.endswith("2"):
+        return m
+    return m[:-1] if m.endswith("'") else (m + "'")
+
+def is_inverse(a, b):
+    return inv_move(a) == b
+
+# ----------------------------
+# Sticker-level cube (exactly matching server)
+# ----------------------------
+
+class StickerCube2x2:
+    def __init__(self):
+        self.faces = {k: [[k]*2 for _ in range(2)] for k in "UDFBLR"}
+
+    def _rot_cw(self, face):
+        n = 2
+        return [[face[n-1-j][i] for j in range(n)] for i in range(n)]
+
+    def _rot_ccw(self, face):
+        n = 2
+        return [[face[j][n-1-i] for j in range(n)] for i in range(n)]
+
+    def _get_row(self, f, r): return self.faces[f][r][:]
+    def _set_row(self, f, r, v): self.faces[f][r] = v[:]
+    def _get_col(self, f, c): return [self.faces[f][i][c] for i in range(2)]
+    def _set_col(self, f, c, v):
+        for i in range(2):
+            self.faces[f][i][c] = v[i]
+
+    def move_U(self, prime=False):
+        if prime:
+            self.faces["U"] = self._rot_ccw(self.faces["U"])
+            t = self._get_row("F", 0)
+            self._set_row("F", 0, self._get_row("L", 0))
+            self._set_row("L", 0, self._get_row("B", 0))
+            self._set_row("B", 0, self._get_row("R", 0))
+            self._set_row("R", 0, t)
+        else:
+            self.faces["U"] = self._rot_cw(self.faces["U"])
+            t = self._get_row("F", 0)
+            self._set_row("F", 0, self._get_row("R", 0))
+            self._set_row("R", 0, self._get_row("B", 0))
+            self._set_row("B", 0, self._get_row("L", 0))
+            self._set_row("L", 0, t)
+
+    def move_D(self, prime=False):
+        if prime:
+            self.faces["D"] = self._rot_ccw(self.faces["D"])
+            t = self._get_row("F", 1)
+            self._set_row("F", 1, self._get_row("R", 1))
+            self._set_row("R", 1, self._get_row("B", 1))
+            self._set_row("B", 1, self._get_row("L", 1))
+            self._set_row("L", 1, t)
+        else:
+            self.faces["D"] = self._rot_cw(self.faces["D"])
+            t = self._get_row("F", 1)
+            self._set_row("F", 1, self._get_row("L", 1))
+            self._set_row("L", 1, self._get_row("B", 1))
+            self._set_row("B", 1, self._get_row("R", 1))
+            self._set_row("R", 1, t)
+
+    def move_F(self, prime=False):
+        if prime:
+            self.faces["F"] = self._rot_ccw(self.faces["F"])
+            t = self._get_row("U", 1)
+            self._set_row("U", 1, self._get_col("R", 0))
+            self._set_col("R", 0, self._get_row("D", 0)[::-1])
+            self._set_row("D", 0, self._get_col("L", 1))
+            self._set_col("L", 1, t[::-1])
+        else:
+            self.faces["F"] = self._rot_cw(self.faces["F"])
+            t = self._get_row("U", 1)
+            self._set_row("U", 1, self._get_col("L", 1)[::-1])
+            self._set_col("L", 1, self._get_row("D", 0))
+            self._set_row("D", 0, self._get_col("R", 0)[::-1])
+            self._set_col("R", 0, t)
+
+    def move_B(self, prime=False):
+        if prime:
+            self.faces["B"] = self._rot_ccw(self.faces["B"])
+            t = self._get_row("U", 0)
+            self._set_row("U", 0, self._get_col("L", 0)[::-1])
+            self._set_col("L", 0, self._get_row("D", 1))
+            self._set_row("D", 1, self._get_col("R", 1)[::-1])
+            self._set_col("R", 1, t)
+        else:
+            self.faces["B"] = self._rot_cw(self.faces["B"])
+            t = self._get_row("U", 0)
+            self._set_row("U", 0, self._get_col("R", 1))
+            self._set_col("R", 1, self._get_row("D", 1)[::-1])
+            self._set_row("D", 1, self._get_col("L", 0))
+            self._set_col("L", 0, t[::-1])
+
+    def move_L(self, prime=False):
+        if prime:
+            self.faces["L"] = self._rot_ccw(self.faces["L"])
+            t = self._get_col("U", 0)
+            self._set_col("U", 0, self._get_col("F", 0))
+            self._set_col("F", 0, self._get_col("D", 0))
+            self._set_col("D", 0, self._get_col("B", 1)[::-1])
+            self._set_col("B", 1, t[::-1])
+        else:
+            self.faces["L"] = self._rot_cw(self.faces["L"])
+            t = self._get_col("U", 0)
+            self._set_col("U", 0, self._get_col("B", 1)[::-1])
+            self._set_col("B", 1, self._get_col("D", 0)[::-1])
+            self._set_col("D", 0, self._get_col("F", 0))
+            self._set_col("F", 0, t)
+
+    def move_R(self, prime=False):
+        if prime:
+            self.faces["R"] = self._rot_ccw(self.faces["R"])
+            t = self._get_col("U", 1)
+            self._set_col("U", 1, self._get_col("B", 0)[::-1])
+            self._set_col("B", 0, self._get_col("D", 1)[::-1])
+            self._set_col("D", 1, self._get_col("F", 1))
+            self._set_col("F", 1, t)
+        else:
+            self.faces["R"] = self._rot_cw(self.faces["R"])
+            t = self._get_col("U", 1)
+            self._set_col("U", 1, self._get_col("F", 1))
+            self._set_col("F", 1, self._get_col("D", 1))
+            self._set_col("D", 1, self._get_col("B", 0)[::-1])
+            self._set_col("B", 0, t[::-1])
+
+    def apply_move(self, m):
+        if m.endswith("2"):
+            self.apply_move(m[:-1])
+            self.apply_move(m[:-1])
+            return
+        prime = m.endswith("'")
+        face = m.replace("'", "")
+        getattr(self, f"move_{face}")(prime)
+
+# ----------------------------
+# Reconstruction (FAST + consistent co definition)
+#   co[pos] = slot index (0/1/2) where the U/D color sits in CORNER_FACES[pos] order
+# ----------------------------
+
+def reconstruct_from_5faces(partial_obs):
+    def get_facelet(face, rc):
+        if face not in partial_obs:
+            return None
+        r, c = rc
+        return partial_obs[face][r][c]
+
+    used = [False] * 8
+    cp = [None] * 8
+    co = [0] * 8
+
+    # constraints per corner
+    pos_need = []
+    pos_seen_sets = []
+    for pos in range(8):
+        faces = CORNER_FACES[pos]
+        need = []
+        seen = []
+        for face in faces:
+            r, c = CORNER_FACELETS[pos][face]
+            v = get_facelet(face, (r, c))
+            need.append(v)
+            if v is not None:
+                seen.append(v)
+        pos_need.append(need)
+        pos_seen_sets.append(frozenset(seen))
+
+    # candidate cubies per position (speedup)
+    cands = []
+    for pos in range(8):
+        seen = pos_seen_sets[pos]
+        possible = []
+        for cubie_id in range(8):
+            if seen.issubset(CUBIE_SET[cubie_id]):
+                possible.append(cubie_id)
+        cands.append(possible)
+
+    # choose most constrained first (fewest candidates, then fewest Nones)
+    order = sorted(
+        range(8),
+        key=lambda p: (len(cands[p]), sum(x is None for x in pos_need[p]))
+    )
+
+    def colors_of_cubie_with_twist(cubie_id, twist):
+        # base has U/D at index 0; we want U/D at index=twist -> rotate by k=(-twist)
+        base = CUBIES[cubie_id]
+        k = (-twist) % 3
+        return (base[k], base[(k + 1) % 3], base[(k + 2) % 3])
+
+    def fits(pos, cubie_id, twist):
+        cols = colors_of_cubie_with_twist(cubie_id, twist)
+        need = pos_need[pos]
+        for i in range(3):
+            if need[i] is not None and need[i] != cols[i]:
+                return False
+        return True
+
+    def dfs(i):
+        if i == 8:
+            return (sum(co) % 3) == 0
+        pos = order[i]
+        for cubie_id in cands[pos]:
+            if used[cubie_id]:
+                continue
+            for twist in range(3):
+                if not fits(pos, cubie_id, twist):
+                    continue
+                used[cubie_id] = True
+                cp[pos] = cubie_id
+                co[pos] = twist
+                if dfs(i + 1):
+                    return True
+                used[cubie_id] = False
+                cp[pos] = None
+                co[pos] = 0
+        return False
+
+    if not dfs(0):
+        raise ValueError("No consistent cube state from 5 faces (mapping mismatch?)")
+
+    s = sum(co[:7]) % 3
+    co[7] = (-s) % 3
+    return tuple(cp), tuple(co)
+
+# ----------------------------
+# Indexing (perm / ori)
+# ----------------------------
+
+def perm_to_idx(p):
+    p = list(p)
+    idx = 0
+    fact = [1, 1, 2, 6, 24, 120, 720, 5040, 40320]
+    for i in range(8):
+        smaller = 0
+        for j in range(i + 1, 8):
+            if p[j] < p[i]:
+                smaller += 1
+        idx += smaller * fact[7 - i]
+    return idx
+
+def idx_to_perm(idx):
+    fact = [1, 1, 2, 6, 24, 120, 720, 5040, 40320]
+    elems = list(range(8))
+    p = []
+    for i in range(8):
+        f = fact[7 - i]
+        q = idx // f
+        idx %= f
+        p.append(elems.pop(q))
+    return tuple(p)
+
+def ori_to_idx(co):
+    idx = 0
+    for i in range(7):
+        idx = idx * 3 + co[i]
+    return idx
+
+def idx_to_ori(idx):
+    co = [0] * 8
+    s = 0
+    for i in range(6, -1, -1):
+        co[i] = idx % 3
+        idx //= 3
+        s += co[i]
+    co[7] = (-s) % 3
+    return tuple(co)
+
+# ----------------------------
+# Build corner move tables from perm24 + pruning
+#   + disk cache
+# ----------------------------
+
+FACE_BASE = {"U": 0, "D": 4, "F": 8, "B": 12, "L": 16, "R": 20}
+def facelet_idx(face, r, c):
+    return FACE_BASE[face] + (r * 2 + c)
+
+CORNER_FACELETS_IDX = {
+    URF: (facelet_idx("U", 1, 1), facelet_idx("R", 0, 0), facelet_idx("F", 0, 1)),
+    UFL: (facelet_idx("U", 1, 0), facelet_idx("F", 0, 0), facelet_idx("L", 0, 1)),
+    ULB: (facelet_idx("U", 0, 0), facelet_idx("L", 0, 0), facelet_idx("B", 0, 1)),
+    UBR: (facelet_idx("U", 0, 1), facelet_idx("B", 0, 0), facelet_idx("R", 0, 1)),
+    DFR: (facelet_idx("D", 0, 1), facelet_idx("F", 1, 1), facelet_idx("R", 1, 0)),
+    DLF: (facelet_idx("D", 0, 0), facelet_idx("L", 1, 1), facelet_idx("F", 1, 0)),
+    DBL: (facelet_idx("D", 1, 0), facelet_idx("B", 1, 1), facelet_idx("L", 1, 0)),
+    DRB: (facelet_idx("D", 1, 1), facelet_idx("R", 1, 1), facelet_idx("B", 1, 0)),
+}
+UD_FACELETS = set(range(0, 8))
+CUBIE_FACELET_SETS = [frozenset(CORNER_FACELETS_IDX[pos]) for pos in range(8)]
+
+def build_perm24_for_move(m):
+    c = StickerCube2x2()
+    idx = 0
+    for f in "UDFBLR":
+        for r in range(2):
+            for col in range(2):
+                c.faces[f][r][col] = idx
+                idx += 1
+    c.apply_move(m)
+    perm = []
+    for f in "UDFBLR":
+        for r in range(2):
+            for col in range(2):
+                perm.append(c.faces[f][r][col])
+    return tuple(perm)  # new[i] = old[perm[i]]
+
+def apply_perm24(state24, perm24):
+    return tuple(state24[i] for i in perm24)
+
+def corner_triple_from_state24(state24, pos):
+    a, b, c = CORNER_FACELETS_IDX[pos]
+    return (state24[a], state24[b], state24[c])
+
+def twist_of_corner(facelet_triple):
+    for i, fid in enumerate(facelet_triple):
+        if fid in UD_FACELETS:
+            return i
+    raise ValueError("invalid corner triple (no U/D facelet)")
+
+def build_corner_move_tables_v2():
+    move_cp = [[0] * 40320 for _ in range(len(MOVES))]
+    move_co = [[0] * 2187 for _ in range(len(MOVES))]
+
+    # precompute perm24 for each move once
+    perm24_list = [build_perm24_for_move(m) for m in MOVES]
+
+    solved24 = tuple(range(24))
+
+    for mi, m in enumerate(MOVES):
+        perm24 = perm24_list[mi]
+        moved24 = apply_perm24(solved24, perm24)
+
+        newpos_to_oldpos = [None] * 8
+        twist_delta_by_oldpos = [0] * 8
+
+        for new_pos in range(8):
+            triple = corner_triple_from_state24(moved24, new_pos)
+            cubie_set = frozenset(triple)
+            old_pos = CUBIE_FACELET_SETS.index(cubie_set)
+            newpos_to_oldpos[new_pos] = old_pos
+            twist_delta_by_oldpos[old_pos] = twist_of_corner(triple)
+
+        for pidx in range(40320):
+            cp_state = idx_to_perm(pidx)
+            new_cp = [0] * 8
+            for new_pos in range(8):
+                old_pos = newpos_to_oldpos[new_pos]
+                new_cp[new_pos] = cp_state[old_pos]
+            move_cp[mi][pidx] = perm_to_idx(tuple(new_cp))
+
+        for oidx in range(2187):
+            co_state = idx_to_ori(oidx)
+            new_co = [0] * 8
+            for new_pos in range(8):
+                old_pos = newpos_to_oldpos[new_pos]
+                new_co[new_pos] = (co_state[old_pos] + twist_delta_by_oldpos[old_pos]) % 3
+            s = sum(new_co[:7]) % 3
+            new_co[7] = (-s) % 3
+            move_co[mi][oidx] = ori_to_idx(tuple(new_co))
+
+    return move_cp, move_co
+
+def build_pruning(move_table, size):
+    dist = [-1] * size
+    q = deque([0])
+    dist[0] = 0
+    while q:
+        x = q.popleft()
+        d = dist[x]
+        for mi in range(len(MOVES)):
+            y = move_table[mi][x]
+            if dist[y] == -1:
+                dist[y] = d + 1
+                q.append(y)
+    return dist
+
+def load_tables_cache():
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, "rb") as f:
+            obj = pickle.load(f)
+        return obj
+    return None
+
+def save_tables_cache(obj):
+    with open(CACHE_FILE, "wb") as f:
+        pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+cached = load_tables_cache()
+if cached:
+    MOVE_CP, MOVE_CO, DIST_CP, DIST_CO = cached
+    log.success(f"Tables loaded from cache: {CACHE_FILE}")
+else:
+    log.info("Building move/pruning tables (one-time)...")
+    t0 = time.time()
+    MOVE_CP, MOVE_CO = build_corner_move_tables_v2()
+    DIST_CP = build_pruning(MOVE_CP, 40320)
+    DIST_CO = build_pruning(MOVE_CO, 2187)
+    save_tables_cache((MOVE_CP, MOVE_CO, DIST_CP, DIST_CO))
+    log.success(f"Tables ready and cached. ({time.time()-t0:.2f}s)")
+
+# ----------------------------
+# IDA* solver <= 11 (optimized branching)
+# ----------------------------
+
+def ida_solve(cp, co, max_depth=11):
+    cp_idx = perm_to_idx(cp)
+    co_idx = ori_to_idx(co)
+
+    if DIST_CP[cp_idx] < 0 or DIST_CO[co_idx] < 0:
+        raise ValueError("unreachable state (should not happen if model consistent)")
+
+    def heuristic(cpi, coi):
+        a = DIST_CP[cpi]
+        b = DIST_CO[coi]
+        if a < 0 or b < 0:
+            raise ValueError("unreachable in heuristic")
+        return a if a > b else b
+
+    bound = heuristic(cp_idx, co_idx)
+    path = []  # store move strings
+
+    def dfs(cpi, coi, g, bound, last_face=None, last_move=None):
+        f = g + heuristic(cpi, coi)
+        if f > bound:
+            return f
+        if cpi == 0 and coi == 0:
+            return True
+        if g == bound:
+            return False
+
+        min_next = 10**9
+
+        # expand by face, skip repeating same face
+        for face in FACES:
+            if last_face is not None and face == last_face:
+                continue
+            for m in MOVES_BY_FACE[face]:
+                if last_move is not None and is_inverse(last_move, m):
+                    continue
+
+                mi = MOVE_INDEX[m]
+                ncpi = MOVE_CP[mi][cpi]
+                ncoi = MOVE_CO[mi][coi]
+
+                path.append(m)
+                res = dfs(ncpi, ncoi, g + 1, bound, face, m)
+                if res is True:
+                    return True
+                path.pop()
+
+                if isinstance(res, int) and res < min_next:
+                    min_next = res
+
+        return min_next
+
+    while bound <= max_depth:
+        res = dfs(cp_idx, co_idx, 0, bound)
+        if res is True:
+            return " ".join(path)
+        if isinstance(res, int) and res > max_depth:
+            break
+        bound += 1
+
+    return ""
+
+# ----------------------------
+# Parsing server output: 5 face blocks
+# ----------------------------
+
+def recv_face_block(io):
+    line = io.recvline().decode()
+    if not line.startswith("Face "):
+        raise EOFError("Unexpected output: " + line)
+    face = line.split()[1].strip(":")
+    io.recvline()  # +-----+
+    row1 = io.recvline().decode().strip()
+    row2 = io.recvline().decode().strip()
+    io.recvline()  # +-----+
+
+    def parse_row(s):
+        return s.strip("|").strip().split()
+
+    return face, [parse_row(row1), parse_row(row2)]
+
+def solve_round(io):
+    partial = {}
+    for _ in range(5):
+        f, mat = recv_face_block(io)
+        partial[f] = mat
+
+    io.recvuntil(b"Enter your solution:\n")
+
+    cp, co = reconstruct_from_5faces(partial)
+    sol = ida_solve(cp, co, max_depth=11)
+    if not sol:
+        # 正常情况下不会发生
+        sol = "U"
+    return sol
+
+# ----------------------------
+# main
+# ----------------------------
+
+def main():
+    # 调试时开 debug；远程建议 info 以减少输出开销
+    # context.log_level = "debug"
+
+    io = process(["python3", "app.py"])
+    # io = remote("127.0.0.1", 1337)
+
+    io.recvuntil(b"get the flag!\n")
+
+    t_all = time.time()
+    for rnd in range(1, 101):
+        io.recvuntil(b"=== Round ")
+        io.recvline()
+        io.recvline()
+
+        t0 = time.time()
+        sol = solve_round(io)
+        dt = (time.time() - t0) * 1000.0
+        log.info(f"Round {rnd} sol_len={len(sol.split())} time={dt:.2f}ms")
+
+        io.sendline(sol.encode())
+
+        line = io.recvline().decode(errors="ignore")
+        if "[-]" in line:
+            log.error("Rejected: " + line)
+            log.error(io.recvall().decode(errors="ignore"))
+            return
+        io.recvline()
+
+    log.success(f"Done in {time.time()-t_all:.2f}s")
+    io.interactive()
+
+if __name__ == "__main__":
+    main()
