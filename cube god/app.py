@@ -7,8 +7,6 @@ import sys
 
 class RubiksCube2x2:
     def __init__(self):
-        # 2x2 魔方，每个面是 2x2 的矩阵
-        # 初始状态：U(全U), D(全D), ...
         self.faces = {k: [[k] * 2 for _ in range(2)] for k in "UDFBLR"}
 
     def _rotate_face_cw(self, face):
@@ -250,11 +248,9 @@ def main():
         hidden = random.choice(all_faces)
         show = [f for f in all_faces if f != hidden]
 
-        # print(f"Scramble: {scramble}\n")
         print(cube.display(show))
         print("[?] Enter your solution:")
 
-        # signal.alarm(15)
         signal.alarm(1)
 
         try:
