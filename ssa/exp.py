@@ -3,8 +3,9 @@ from pwn import *
 
 context(log_level="info", arch="amd64")
 
-io = process("./SSA")
-elf = ELF("./SSA")
+io = process("./vuln_patched")
+# io = remote("localhost", 9999)
+elf = ELF("./vuln_patched")
 libc = ELF("./libc.so.6")
 
 OP_CONST = 0x3A

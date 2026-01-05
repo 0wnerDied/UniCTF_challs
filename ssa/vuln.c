@@ -196,7 +196,7 @@ static inline void op_handler_6(Instruction *inst)
 		printf("%p\n", values[inst->dest].data.func_ptr);
 }
 
-static inline void op_handler_7()
+static inline void op_handler_7(Instruction *inst __attribute__((unused)))
 {
 	exit(0);
 }
