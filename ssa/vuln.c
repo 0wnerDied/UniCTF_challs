@@ -44,11 +44,6 @@ const uint8_t opcode_map[8] = {
 	0xAF // exit
 };
 
-const uint8_t xor_table[16] = { 0x5A, 0xA5, 0x3C, 0xC3, 0x69, 0x96, 0x1E, 0xE1,
-				0x2D, 0xD2, 0x4B, 0xB4, 0x87, 0x78, 0xF0, 0x0F };
-
-const int shift_table[8] = { 3, 7, 1, 5, 2, 6, 4, 0 };
-
 void setbufs()
 {
 	setvbuf(stdout, NULL, _IONBF, 0);
@@ -201,76 +196,95 @@ static inline void op_handler_7(Instruction *inst __attribute__((unused)))
 	exit(0);
 }
 
+/*
+ * 代码混淆，感谢Gemini 3.0 Pro，等价于：
+ * int decode_opcode(uint8_t encoded_op) {
+ *     for (int i = 0; i < 8; i++) {
+ *         if (opcode_map[i] == encoded_op) {
+ *             return i;
+ *         }
+ *     }
+ *     return -1;
+ * }
+ */
 int decode_opcode(uint8_t encoded_op)
 {
-	uint32_t state = encoded_op;
-	for (int round = 0; round < 3; round++) {
-		state ^= xor_table[state & 0xF];
-		state = ((state << 3) | (state >> 5)) & 0xFF;
-		state += opcode_map[round % 8];
-		state &= 0xFF;
+	// 定义标签地址数组
+	static void *dispatch_table[] = { &&lbl_init, &&lbl_loop_check,
+					  &&lbl_calc, &&lbl_update,
+					  &&lbl_next, &&lbl_ret };
+
+	// 使用 volatile 阻止编译器优化
+	volatile int i = 0;
+	volatile int result = -1;
+	volatile uint32_t state = 0; // 初始状态索引
+	volatile uint32_t entropy = (uint32_t)rand_slot;
+
+	// 初始跳转
+	goto *dispatch_table[state];
+
+lbl_init:
+	i = 0;
+	result = -1;
+	// 复杂的算术运算来决定下一个状态是 1 (lbl_loop_check)
+	// 这里利用地址差值计算，实际上最后赋值为 1
+	state = (uint32_t)((uintptr_t)dispatch_table[1] -
+			   (uintptr_t)dispatch_table[0]);
+	state = 1;
+	goto *dispatch_table[state];
+
+lbl_loop_check:
+	// 检查 i < 8
+	// 将比较转换为位运算： (8 - i - 1) 的符号位
+	if (((7 - i) >> 31) & 1) {
+		state = 5; // i >= 8, 跳转到 lbl_ret
+	} else {
+		state = 2; // i < 8, 跳转到 lbl_calc
 	}
+	goto *dispatch_table[state];
 
-	int path[16];
-	int path_len = 0;
-	for (int i = 0; i < 8; i++) {
-		int idx = shift_table[i];
-		path[path_len++] = idx;
+lbl_calc : {
+	uint8_t target = opcode_map[i];
 
-		if ((state >> i) & 1) {
-			path[path_len++] = (idx + 4) % 8;
-		}
+	// MBA (Mixed Boolean-Arithmetic) 混淆
+	// 目标: diff = encoded_op ^ target
+	// 公式: (A ^ B) = (A | B) - (A & B)
+	int t1 = (encoded_op | target);
+	int t2 = (encoded_op & target);
+	int diff = t1 - t2;
+
+	// 构造掩码: 如果 diff == 0, mask = -1 (0xFFFFFFFF), 否则 mask = 0
+	// 混淆: 利用 diff | -diff 提取符号位
+	int is_zero = ((diff | -diff) >> 31) + 1;
+	int mask = -is_zero;
+
+	// 混淆 result 更新逻辑
+	// 如果 mask 是 -1 (匹配)，result 变成 i
+	// 如果 mask 是 0 (不匹配)，result 保持原值
+	// 原理: result = (i & mask) | (result & ~mask);
+	// 进一步 MBA 混淆: result = result ^ ((result ^ i) & mask);
+	result = result ^ ((result ^ i) & mask);
+
+	state = 3; // 跳转到 lbl_update
+	goto *dispatch_table[state];
+}
+
+lbl_update:
+	// 插入一段虚假代码，看起来像是在修改 values 数组
+	if (entropy == 0xDEADBEEF) {
+		values[0].type = TYPE_INT;
 	}
+	state = 4; // 跳转到 lbl_next
+	goto *dispatch_table[state];
 
-	int candidates[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
-	int candidate_count = 0;
-	int hash_sum = 0;
+lbl_next:
+	i++;
+	// 动态计算跳转表索引，防止静态分析直接看到 state = 2
+	// 实际上 state 必须变回 1 (lbl_loop_check)
+	state = (state & 0) | 1;
+	goto *dispatch_table[state];
 
-	for (int i = 0; i < path_len; i++) {
-		int idx = path[i] % 8;
-		hash_sum = (hash_sum * 31 + opcode_map[idx]) & 0xFFFF;
-
-		if (opcode_map[idx] == encoded_op) {
-			candidates[candidate_count++] = idx;
-			hash_sum ^= (idx << 4);
-
-			if (candidate_count > 1) {
-				int diff = candidates[candidate_count - 1] -
-					   candidates[candidate_count - 2];
-				hash_sum += diff * diff;
-			}
-		}
-
-		if (hash_sum > 0x1000) {
-			hash_sum = (hash_sum >> 4) ^ (hash_sum & 0xF);
-		}
-	}
-
-	int result = -1;
-	if (candidate_count > 0) {
-		int selector = hash_sum % candidate_count;
-		result = candidates[selector];
-
-		for (int i = 0; i < candidate_count; i++) {
-			if (candidates[i] >= 0 && candidates[i] < 8) {
-				if (opcode_map[candidates[i]] == encoded_op) {
-					result = candidates[i];
-					break;
-				}
-			}
-		}
-	}
-
-	if (result >= 0) {
-		int verify_hash = 0;
-		for (int i = 0; i < 8; i++) {
-			verify_hash ^= opcode_map[i] * (result + 1);
-		}
-		if ((verify_hash & 0xFF) == (hash_sum & 0xFF)) {
-			result = result;
-		}
-	}
-
+lbl_ret:
 	return result;
 }
 
