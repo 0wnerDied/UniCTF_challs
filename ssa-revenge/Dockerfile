@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential binutils ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-COPY Makefile vuln.c ./
+COPY Makefile vuln.cpp ./
 RUN make
 
 # Runtime stage

