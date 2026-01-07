@@ -597,7 +597,13 @@ class SSAInterpreter {
 				}
 
 				uintptr_t p = reinterpret_cast<uintptr_t>(ptr);
-				if (!in_exe(p, sizeof(int64_t))) {
+
+				// Validate read source against executable segment
+				auto check_ro_access = [&](uintptr_t addr) {
+					return in_exe(addr, sizeof(int64_t));
+				};
+
+				if (!check_ro_access(p)) {
 					std::cerr << "[!] LOAD err2"
 						  << std::endl;
 					std::abort();
@@ -635,8 +641,13 @@ class SSAInterpreter {
 			uintptr_t target_addr =
 				reinterpret_cast<uintptr_t>(target_ptr);
 
-			if (target_addr < values_base ||
-			    target_addr > values_limit - sizeof(int64_t)) {
+			// Ensure target pointer falls within the valid values array range
+			auto check_storage_bounds = [&](uintptr_t addr) {
+				return addr >= values_base &&
+				       addr <= values_limit - sizeof(int64_t);
+			};
+
+			if (!check_storage_bounds(target_addr)) {
 				std::cerr << "[!] STORE err2" << std::endl;
 				std::abort();
 			}
@@ -646,30 +657,49 @@ class SSAInterpreter {
 			size_t offset_in_slot =
 				offset_in_array % sizeof(SSAValue);
 
-			if (offset_in_slot < sizeof(ValueType)) {
+			// Prevent overwriting the type header within a slot
+			auto check_header_integrity = [&](size_t off) {
+				return off >= sizeof(ValueType);
+			};
+
+			if (!check_header_integrity(offset_in_slot)) {
 				std::cerr << "[!] STORE err3" << std::endl;
 				std::abort();
 			}
 
 			uintptr_t s = target_addr;
 			uintptr_t e = target_addr + sizeof(int64_t);
-			uintptr_t rlo =
-				reinterpret_cast<uintptr_t>(&values[rand_slot]);
-			uintptr_t rhi = rlo + sizeof(SSAValue);
 
-			if (!(e <= rlo || s >= rhi)) {
+			// Protect the randomized slot from corruption
+			auto check_protected_overlap = [&](uintptr_t start,
+							   uintptr_t end) {
+				uintptr_t rlo = reinterpret_cast<uintptr_t>(
+					&values[rand_slot]);
+				uintptr_t rhi = rlo + sizeof(SSAValue);
+				return !(end <= rlo || start >= rhi);
+			};
+
+			if (check_protected_overlap(s, e)) {
 				std::cerr << "[!] STORE err4" << std::endl;
 				std::abort();
 			}
 
-			size_t next_slot_offset =
-				(slot_index + 1) * sizeof(SSAValue);
-			size_t write_end_offset =
-				offset_in_array + sizeof(int64_t);
+			// Enforce slot isolation policy
+			auto verify_slot_isolation = [&](uintptr_t addr,
+							 size_t idx) {
+				uintptr_t slot_base =
+					reinterpret_cast<uintptr_t>(
+						&values[idx]);
+				uintptr_t slot_ceiling =
+					slot_base + sizeof(SSAValue);
 
-			// [VULN] Off-by-one store to overwrite type field of next slot, '>' should be '>='
-			if (write_end_offset >
-			    next_slot_offset + sizeof(ValueType)) {
+				// [VULN] This check only validates the start address.
+				// Since we write 8 bytes, addr = slot_ceiling - 4 passes,
+				// overwriting next slot's type.
+				return addr < slot_ceiling;
+			};
+
+			if (!verify_slot_isolation(target_addr, slot_index)) {
 				std::cerr << "[!] STORE err5" << std::endl;
 				std::abort();
 			}
@@ -701,7 +731,14 @@ class SSAInterpreter {
 					uintptr_t fp =
 						reinterpret_cast<uintptr_t>(
 							func_ptr);
-					if (in_exe(fp, 1)) {
+
+					// Validate entry point restriction
+					auto check_entry_policy =
+						[&](uintptr_t ptr) {
+							return in_exe(ptr, 1);
+						};
+
+					if (check_entry_policy(fp)) {
 						std::cerr << "[!] CALL err3"
 							  << std::endl;
 						std::abort();
@@ -733,8 +770,17 @@ class SSAInterpreter {
 					uintptr_t ap =
 						static_cast<uintptr_t>(arg);
 					if (ap != 0) {
-						if (in_values(ap, 1) ||
-						    in_exe(ap, 1)) {
+						// Validate argument pointer security policy
+						auto check_arg_policy =
+							[&](uintptr_t ptr) {
+								return in_values(
+									       ptr,
+									       1) ||
+								       in_exe(ptr,
+									      1);
+							};
+
+						if (check_arg_policy(ap)) {
 							std::cerr
 								<< "[!] CALL err4"
 								<< std::endl;
