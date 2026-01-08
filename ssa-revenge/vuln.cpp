@@ -1,13 +1,4 @@
-#include <iostream>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <cstdint>
-#include <unistd.h>
-#include <cctype>
-#include <ctime>
-#include <string>
-#include <algorithm>
+#include <bits/stdc++.h>
 
 #define MAX_VALUES 64
 #define MAX_INSTRUCTIONS 128
@@ -157,6 +148,21 @@ class SSAInterpreter {
 			std::fread(ptr, 1, size, f);
 			std::fclose(f);
 		}
+	}
+
+	int get_random_int(int min, int max)
+	{
+		if (min >= max)
+			return min;
+
+		unsigned int random_value;
+		FILE *f = std::fopen("/dev/urandom", "rb");
+		if (f) {
+			std::fread(&random_value, sizeof(random_value), 1, f);
+			std::fclose(f);
+		}
+
+		return min + (random_value % (max - min));
 	}
 
 	void trim(char *s)
@@ -1159,8 +1165,7 @@ class SSAInterpreter {
 		label_count = 0;
 		blk_count = 0;
 
-		std::srand(std::time(nullptr));
-		rand_slot = std::rand() % MAX_VALUES;
+		rand_slot = get_random_int(0, MAX_VALUES);
 
 		exe_lo = reinterpret_cast<uintptr_t>(&__executable_start);
 		exe_hi = reinterpret_cast<uintptr_t>(&_end);
