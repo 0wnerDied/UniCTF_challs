@@ -28,5 +28,5 @@ ulimit -u 256 2>/dev/null || true     # max user processes
 
 # Drop to user and start service via socat on 0.0.0.0:9999
 cd /home/ctf
-exec socat -T60 -t60 TCP-LISTEN:9999,reuseaddr,fork,su=ctf \
-    EXEC:"/home/ctf/vuln",pty,rawer,echo=0
+exec socat TCP-LISTEN:9999,reuseaddr,fork,su=ctf \
+    EXEC:"/home/ctf/vuln"
