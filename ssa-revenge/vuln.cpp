@@ -106,13 +106,14 @@ class SSAInterpreter {
 	{
 		if (len == 0)
 			return false;
-		if (a < lo)
+		if (a < lo || a >= hi)
 			return false;
-		if (a > hi)
+
+		uintptr_t end;
+		if (__builtin_add_overflow(a, len, &end))
 			return false;
-		if (len > static_cast<size_t>(hi - a))
-			return false;
-		return true;
+
+		return end <= hi;
 	}
 
 	bool in_exe(uintptr_t a, size_t len)
@@ -564,18 +565,23 @@ class SSAInterpreter {
 			if (values[ins->src1].type == TYPE_INT &&
 			    values[ins->src2].type == TYPE_INT) {
 				values[ins->dest].type = TYPE_INT;
-				values[ins->dest].data.int_val =
-					values[ins->src1].data.int_val +
-					values[ins->src2].data.int_val;
+				values[ins->dest]
+					.data.int_val = static_cast<int64_t>(
+					static_cast<uint64_t>(
+						values[ins->src1].data.int_val) +
+					static_cast<uint64_t>(
+						values[ins->src2].data.int_val));
 			} else if (values[ins->src1].type == TYPE_PTR &&
 				   values[ins->src2].type == TYPE_INT) {
 				values[ins->dest].type = TYPE_PTR;
-				values[ins->dest].data.ptr_val =
-					static_cast<void *>(
-						static_cast<char *>(
-							values[ins->src1]
-								.data.ptr_val) +
-						values[ins->src2].data.int_val);
+				values[ins->dest]
+					.data.ptr_val = static_cast<void *>(
+					static_cast<char *>(
+						values[ins->src1].data.ptr_val) +
+					static_cast<int64_t>(
+						static_cast<uint64_t>(
+							values[ins->src2]
+								.data.int_val)));
 			}
 			markVisible(blk, ins->dest);
 			break;
@@ -706,6 +712,11 @@ class SSAInterpreter {
 
 			*static_cast<int64_t *>(target_ptr) =
 				values[ins->src1].data.int_val;
+
+			if (slot_index < MAX_VALUES) {
+				values[slot_index].type = TYPE_INT;
+			}
+
 			break;
 		}
 		case OP_CALL:
@@ -943,6 +954,26 @@ class SSAInterpreter {
 			std::cout << "Program too large!" << std::endl;
 			return;
 		}
+
+		if (inst_count == 0) {
+			char op[32] = { 0 };
+			std::sscanf(line, "%31s", op);
+			if (std::strcmp(op, "label") != 0) {
+				std::cerr
+					<< "[!] First instruction must be a label (no implicit entry)"
+					<< std::endl;
+				return;
+			}
+			char label_name[NAME_LEN] = { 0 };
+			std::sscanf(line, "%*s %31s", label_name);
+			trim(label_name);
+			if (std::strcmp(label_name, "entry") != 0) {
+				std::cerr << "[!] First label must not be '"
+					  << label_name << "'" << std::endl;
+				return;
+			}
+		}
+
 		Instruction inst;
 		std::memset(&inst, 0, sizeof(inst));
 		inst.dest = -1;
