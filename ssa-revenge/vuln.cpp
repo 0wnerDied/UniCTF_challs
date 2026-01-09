@@ -155,7 +155,7 @@ class SSAInterpreter {
 		if (min >= max)
 			return min;
 
-		unsigned int random_value;
+		unsigned int random_value = 0;
 		FILE *f = std::fopen("/dev/urandom", "rb");
 		if (f) {
 			std::fread(&random_value, sizeof(random_value), 1, f);

@@ -4,7 +4,7 @@
 FROM ubuntu:25.10 AS build
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential binutils ca-certificates \
+    clang lld make ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Makefile vuln.cpp ./
