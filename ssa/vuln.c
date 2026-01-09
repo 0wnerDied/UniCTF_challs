@@ -207,85 +207,192 @@ static inline void op_handler_7(Instruction *inst __attribute__((unused)))
  *     return -1;
  * }
  */
+
+/*
+ * ============================================================
+ * VM 内部状态定义 (伪装)
+ * ============================================================
+ */
+typedef struct {
+	uint64_t cpu_ticks;
+	uint32_t interrupt_mask;
+	uint32_t pipeline_flags;
+	void *fault_handler;
+} VM_Internal_State;
+
+volatile VM_Internal_State g_vm_core;
+
+/*
+ * ============================================================
+ * 硬件模拟宏 (MBA 混淆)
+ * ============================================================
+ */
+// 模拟加法: (A ^ B) + 2*(A & B)
+#define _HW_ADD(x, y) (((x) ^ (y)) + 2 * ((x) & (y)))
+// 模拟减法: A - B = A + (~B + 1)
+#define _HW_SUB(x, y) ((x) + (~(y) + 1))
+// 模拟异或: (A | B) - (A & B)
+#define _HW_XOR(x, y) (((x) | (y)) - ((x) & (y)))
+// 符号位提取
+#define _SIGN_BIT(x) ((x) >> 31)
+
 int decode_opcode(uint8_t encoded_op)
 {
-	// 定义标签地址数组
-	static void *dispatch_table[] = { &&lbl_init, &&lbl_loop_check,
-					  &&lbl_calc, &&lbl_update,
-					  &&lbl_next, &&lbl_ret };
+	// 伪装成中断向量表
+	static void *interrupt_vector_table[] = {
+		&&lbl_sys_reset, // 0: 复位
+		&&lbl_irq_check, // 1: 边界检查 (Loop Condition)
+		&&lbl_fetch_microcode, // 2: 取指 (Load)
+		&&lbl_alu_compare, // 3: 比较 (Compare)
+		&&lbl_ctx_commit, // 4: 提交 (Update)
+		&&lbl_tick_update, // 5: 步进 (Increment)
+		&&lbl_trap_handler, // 6: 虚假分支 (Trap)
+		&&lbl_bus_error, // 7: 虚假分支 (Error)
+		&&lbl_sys_return // 8: 返回
+	};
 
-	// 使用 volatile 阻止编译器优化
-	volatile int i = 0;
-	volatile int result = -1;
-	volatile uint32_t state = 0; // 初始状态索引
-	volatile uint32_t entropy = (uint32_t)rand_slot;
+	volatile int vector_idx = 0; // 对应 i
+	volatile int latch_register = -1; // 对应 result
 
-	// 初始跳转
-	goto *dispatch_table[state];
+	// 初始跳转：计算 lbl_sys_reset 的索引 (0)
+	// 使用 Label 地址差来混淆，让 IDA 无法静态计算
+	// 逻辑： (Addr - Addr) & 0xF = 0
+	uintptr_t base_offset =
+		(uintptr_t) &&
+		lbl_sys_reset - (uintptr_t)interrupt_vector_table[0];
+	uint32_t dispatch_idx = (uint32_t)base_offset & 0xF;
 
-lbl_init:
-	i = 0;
-	result = -1;
-	// 复杂的算术运算来决定下一个状态是 1 (lbl_loop_check)
-	// 这里利用地址差值计算，实际上最后赋值为 1
-	state = (uint32_t)((uintptr_t)dispatch_table[1] -
-			   (uintptr_t)dispatch_table[0]);
-	state = 1;
-	goto *dispatch_table[state];
+	goto *interrupt_vector_table[dispatch_idx];
 
-lbl_loop_check:
-	// 检查 i < 8
-	// 将比较转换为位运算： (8 - i - 1) 的符号位
-	if (((7 - i) >> 31) & 1) {
-		state = 5; // i >= 8, 跳转到 lbl_ret
-	} else {
-		state = 2; // i < 8, 跳转到 lbl_calc
+	/* ------------------------------------------------------ */
+
+lbl_sys_reset:
+	vector_idx = 0;
+	latch_register = -1;
+
+	// 动态计算跳转到 lbl_irq_check (1)
+	{
+		// 强制建立数据依赖，消除 unused variable 警告
+		intptr_t diff = (intptr_t) && lbl_irq_check - (intptr_t) &&
+				lbl_sys_reset;
+
+		// 我们需要 dispatch_idx = 1
+		// 构造一个恒为 0 的噪声: (diff ^ diff)
+		uint32_t noise = (uint32_t)_HW_XOR(diff, diff);
+
+		dispatch_idx = _HW_ADD(noise, 1);
 	}
-	goto *dispatch_table[state];
+	goto *interrupt_vector_table[dispatch_idx];
 
-lbl_calc : {
-	uint8_t target = opcode_map[i];
+	/* ------------------------------------------------------ */
 
-	// MBA (Mixed Boolean-Arithmetic) 混淆
-	// 目标: diff = encoded_op ^ target
-	// 公式: (A ^ B) = (A | B) - (A & B)
-	int t1 = (encoded_op | target);
-	int t2 = (encoded_op & target);
-	int diff = t1 - t2;
+lbl_irq_check:
+	// 逻辑修正：严格的边界检查
+	// if (vector_idx > 7) break;
+	{
+		// 使用减法宏: 7 - vector_idx
+		// 当 vector_idx = 0..7 时，结果为 7..0 (正数, 符号位 0)
+		// 当 vector_idx = 8 时，结果为 -1 (负数, 符号位 -1)
+		int rem_cycles = _HW_SUB(7, vector_idx);
+		int is_loop_active =
+			_SIGN_BIT(rem_cycles); // 0 if active, -1 if done
 
-	// 构造掩码: 如果 diff == 0, mask = -1 (0xFFFFFFFF), 否则 mask = 0
-	// 混淆: 利用 diff | -diff 提取符号位
-	int is_zero = ((diff | -diff) >> 31) + 1;
-	int mask = -is_zero;
+		// 虚假分支：不透明谓词
+		if ((vector_idx | 0) <
+		    0) { // vector_idx 从 0 开始增加，不可能小于 0
+			dispatch_idx = 7; // lbl_bus_error
+			goto *interrupt_vector_table[dispatch_idx];
+		}
 
-	// 混淆 result 更新逻辑
-	// 如果 mask 是 -1 (匹配)，result 变成 i
-	// 如果 mask 是 0 (不匹配)，result 保持原值
-	// 原理: result = (i & mask) | (result & ~mask);
-	// 进一步 MBA 混淆: result = result ^ ((result ^ i) & mask);
-	result = result ^ ((result ^ i) & mask);
+		// 计算下一跳：
+		// Active (0)  -> lbl_fetch_microcode (2)
+		// Done (-1)   -> lbl_sys_return (8)
+		// 公式: 2 + (is_loop_active & (8 - 2)) = 2 + (is_loop_active & 6)
+		dispatch_idx = 2 + (is_loop_active & 6);
+	}
+	goto *interrupt_vector_table[dispatch_idx];
 
-	state = 3; // 跳转到 lbl_update
-	goto *dispatch_table[state];
+	/* ------------------------------------------------------ */
+
+lbl_fetch_microcode:
+	// 模拟总线读取
+	{
+		volatile uint8_t bus_data = opcode_map[vector_idx];
+
+		// 比较：diff = encoded_op ^ bus_data
+		int signal_diff = _HW_XOR(encoded_op, bus_data);
+
+		// 将 diff 存入临时状态，这里利用 vector_idx 暂存（高位复用技巧）
+		// 但为了简单和正确，我们直接跳到 ALU 块处理
+		// 实际上我们可以把 diff 藏在 g_vm_core.pipeline_flags 里传递，增加复杂度
+		g_vm_core.pipeline_flags = signal_diff;
+	}
+
+	dispatch_idx = 3; // lbl_alu_compare
+	goto *interrupt_vector_table[dispatch_idx];
+
+	/* ------------------------------------------------------ */
+
+lbl_alu_compare : {
+	// 取回 diff
+	int diff = g_vm_core.pipeline_flags;
+
+	// 构造匹配掩码：if (diff == 0) mask = -1 else mask = 0
+	int zero_detect = ((diff | -diff) >> 31) + 1;
+	int hit_mask = -zero_detect;
+
+	// 逻辑修正：只记录第一次匹配 (First Match Priority)
+	// 如果 latch_register 已经是 -1 以外的值，说明之前匹配过了，mask 强制置 0
+	// latch_register >> 31 在 -1 时是 -1 (0xFF..), 在 >=0 时是 0
+	// 我们需要：如果 latch == -1，允许更新；如果 latch >= 0，禁止更新
+	int not_found_yet = latch_register >> 31;
+	int effective_mask = hit_mask & not_found_yet;
+
+	// 更新逻辑： latch = (latch & ~mask) | (vector_idx & mask)
+	// 只有当 effective_mask 为 -1 时，latch 才会变成 vector_idx
+	latch_register ^= (latch_register ^ vector_idx) & effective_mask;
 }
 
-lbl_update:
-	// 插入一段虚假代码，看起来像是在修改 values 数组
-	if (entropy == 0xDEADBEEF) {
-		values[0].type = TYPE_INT;
+	dispatch_idx = 4; // lbl_ctx_commit
+	goto *interrupt_vector_table[dispatch_idx];
+
+	/* ------------------------------------------------------ */
+
+lbl_ctx_commit:
+	// 伪装的状态提交
+	g_vm_core.cpu_ticks = _HW_ADD(g_vm_core.cpu_ticks, 1);
+
+	dispatch_idx = 5; // lbl_tick_update
+	goto *interrupt_vector_table[dispatch_idx];
+
+	/* ------------------------------------------------------ */
+
+lbl_tick_update:
+	// i++
+	vector_idx = _HW_ADD(vector_idx, 1);
+
+	dispatch_idx = 1; // 回到 Loop Check
+	goto *interrupt_vector_table[dispatch_idx];
+
+	/* ------------------------------------------------------ */
+
+lbl_trap_handler:
+	// 虚假分支：栈破坏
+	{
+		volatile char *stack_junk = (char *)__builtin_alloca(64);
+		if (stack_junk)
+			stack_junk[0] = 0xCC;
+		dispatch_idx = 6; // 死循环
+		goto *interrupt_vector_table[dispatch_idx];
 	}
-	state = 4; // 跳转到 lbl_next
-	goto *dispatch_table[state];
 
-lbl_next:
-	i++;
-	// 动态计算跳转表索引，防止静态分析直接看到 state = 2
-	// 实际上 state 必须变回 1 (lbl_loop_check)
-	state = (state & 0) | 1;
-	goto *dispatch_table[state];
+lbl_bus_error:
+	return -2;
 
-lbl_ret:
-	return result;
+	/* ------------------------------------------------------ */
+
+lbl_sys_return:
+	return latch_register;
 }
 
 void execInst(Instruction *inst)
