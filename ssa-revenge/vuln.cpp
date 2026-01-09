@@ -664,40 +664,36 @@ class SSAInterpreter {
 				std::abort();
 			}
 
-			size_t offset_in_array = target_addr - values_base;
-			size_t slot_index = offset_in_array / sizeof(SSAValue);
-			size_t offset_in_slot =
-				offset_in_array % sizeof(SSAValue);
-
-			/*
-			 * Verify write stays within the data region of current slot
-			 * SSAValue layout: [type: 4 bytes][data: 8 bytes] = 12 bytes total
-			 * Valid write offsets within slot: [4, 12) for the data region
-			 *
-			 * [VULN] This check only validates that the write START offset falls within [4, 12).
-			 * However, we write 8 bytes (sizeof(int64_t)), so the write END offset is (off + 8).
-			 * When off > 4 (e.g., off = 8), the write spans [8, 16), exceeding the slot boundary (12),
-			 * and corrupts the next slot's type field (first 4 bytes of next SSAValue).
-			 * Correct check should be: off >= 4 && (off + 8) <= 12, i.e., off == 4 only.
-			 */
-			auto check_slot_data_region = [&](size_t off) {
-				size_t data_region_start = sizeof(ValueType);
-				size_t data_region_end = sizeof(SSAValue);
-				return off >= data_region_start &&
-				       off < data_region_end;
+			// Enforce 4-byte alignment to prevent unaligned memory access
+			auto check_alignment = [&](uintptr_t addr) {
+				return addr % sizeof(int32_t) == 0;
 			};
 
-			if (!check_slot_data_region(offset_in_slot)) {
+			if (!check_alignment(target_addr)) {
 				std::cerr << "[!] STORE err3" << std::endl;
 				std::abort();
 			}
 
-			// Prevent overwriting the type header within a slot
-			auto check_header_integrity = [&](size_t off) {
-				return off >= offsetof(SSAValue, data);
+			size_t offset_in_array = target_addr - values_base;
+			size_t offset_in_slot =
+				offset_in_array % sizeof(SSAValue);
+
+			/*
+			 * Prevent direct overwrite of the type header within a slot
+			 * SSAValue layout: [type: 4 bytes][data: 8 bytes] = 12 bytes total
+			 * Valid write offsets within slot: [4, 12) for the data region
+			 *
+			 * [VULN] This check only validates that the write does NOT start at offset 0.
+			 * However, we write 8 bytes (sizeof(int64_t)), so writes starting at offset 8
+			 * will span [8, 16), corrupting the next slot's type field at offset [12, 16).
+			 * The check fails to validate the write END boundary.
+			 * Correct check should ensure: offset >= 4 && (offset + 8) <= 12, i.e., offset == 4 only.
+			 */
+			auto check_header_collision = [&](size_t off) {
+				return off == 0;
 			};
 
-			if (!check_header_integrity(offset_in_slot)) {
+			if (check_header_collision(offset_in_slot)) {
 				std::cerr << "[!] STORE err4" << std::endl;
 				std::abort();
 			}
@@ -721,6 +717,8 @@ class SSAInterpreter {
 
 			*static_cast<int64_t *>(target_ptr) =
 				values[ins->src1].data.int_val;
+
+			size_t slot_index = offset_in_array / sizeof(SSAValue);
 
 			if (slot_index < MAX_VALUES) {
 				values[slot_index].type = TYPE_INT;
