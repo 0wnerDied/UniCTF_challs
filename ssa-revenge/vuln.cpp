@@ -669,13 +669,36 @@ class SSAInterpreter {
 			size_t offset_in_slot =
 				offset_in_array % sizeof(SSAValue);
 
+			/*
+			 * Verify write stays within the data region of current slot
+			 * SSAValue layout: [type: 4 bytes][data: 8 bytes] = 12 bytes total
+			 * Valid write offsets within slot: [4, 12) for the data region
+			 *
+			 * [VULN] This check only validates that the write START offset falls within [4, 12).
+			 * However, we write 8 bytes (sizeof(int64_t)), so the write END offset is (off + 8).
+			 * When off > 4 (e.g., off = 8), the write spans [8, 16), exceeding the slot boundary (12),
+			 * and corrupts the next slot's type field (first 4 bytes of next SSAValue).
+			 * Correct check should be: off >= 4 && (off + 8) <= 12, i.e., off == 4 only.
+			 */
+			auto check_slot_data_region = [&](size_t off) {
+				size_t data_region_start = sizeof(ValueType);
+				size_t data_region_end = sizeof(SSAValue);
+				return off >= data_region_start &&
+				       off < data_region_end;
+			};
+
+			if (!check_slot_data_region(offset_in_slot)) {
+				std::cerr << "[!] STORE err3" << std::endl;
+				std::abort();
+			}
+
 			// Prevent overwriting the type header within a slot
 			auto check_header_integrity = [&](size_t off) {
-				return off >= sizeof(ValueType);
+				return off >= offsetof(SSAValue, data);
 			};
 
 			if (!check_header_integrity(offset_in_slot)) {
-				std::cerr << "[!] STORE err3" << std::endl;
+				std::cerr << "[!] STORE err4" << std::endl;
 				std::abort();
 			}
 
@@ -692,26 +715,6 @@ class SSAInterpreter {
 			};
 
 			if (check_protected_overlap(s, e)) {
-				std::cerr << "[!] STORE err4" << std::endl;
-				std::abort();
-			}
-
-			// Enforce slot isolation policy
-			auto verify_slot_isolation = [&](uintptr_t addr,
-							 size_t idx) {
-				uintptr_t slot_base =
-					reinterpret_cast<uintptr_t>(
-						&values[idx]);
-				uintptr_t slot_ceiling =
-					slot_base + sizeof(SSAValue);
-
-				// [VULN] This check only validates the start address.
-				// Since we write 8 bytes, addr = slot_ceiling - 4 passes,
-				// overwriting next slot's type.
-				return addr < slot_ceiling;
-			};
-
-			if (!verify_slot_isolation(target_addr, slot_index)) {
 				std::cerr << "[!] STORE err5" << std::endl;
 				std::abort();
 			}
