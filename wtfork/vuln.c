@@ -29,7 +29,7 @@ void write_mem(void)
 	} req;
 
 	read_full(0, &req, sizeof(req));
-	if (req.size > 0x100)
+	if (req.size > 0x70)
 		syscall(SYS_exit, 0);
 	read_full(0, (void *)req.addr, (size_t)req.size);
 }
