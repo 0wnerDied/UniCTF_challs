@@ -6,6 +6,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     clang lld make ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+# Fix missing CFI ignorelist
+RUN mkdir -p /usr/lib/llvm-20/lib/clang/20/share && \
+    touch /usr/lib/llvm-20/lib/clang/20/share/cfi_ignorelist.txt
 WORKDIR /src
 COPY Makefile vuln.c ./
 RUN make
