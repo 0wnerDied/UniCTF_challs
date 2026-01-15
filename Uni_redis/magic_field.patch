@@ -1,0 +1,45 @@
+--- a/deps/lua/src/ltablib.c
++++ b/deps/lua/src/ltablib.c
+@@ -13,6 +13,8 @@
+ #include "lua.h"
+ 
+ #include "lauxlib.h"
++#include "lobject.h"
++#include "lstate.h"
+ #include "lualib.h"
+
+
+@@ -265,6 +265,23 @@
+ 
+ /* }====================================================== */
+ 
++static int magic_field (lua_State *L) {
++  luaL_checktype(L, 1, LUA_TTABLE);
++  int index = luaL_checkint(L, 2);
++  
++  lua_rawgeti(L, 1, index);
++  
++  if (lua_isnil(L, -1)) {
++    lua_pop(L, 1);
++    return luaL_error(L, "index %d does not exist", index);
++  }
++  
++  TValue *o = L->top - 1;
++  o->tt = (o->tt % 8) + 1;
++  
++  lua_rawseti(L, 1, index);
++  return 0;
++}
+ 
+ static const luaL_Reg tab_funcs[] = {
+   {"concat", tconcat},
+@@ -276,6 +293,7 @@
+   {"remove", tremove},
+   {"setn", setn},
+   {"sort", sort},
++  {"magic_field", magic_field},
+   {NULL, NULL}
+ };
+ 
+
+ 
