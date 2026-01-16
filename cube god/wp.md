@@ -1,85 +1,55 @@
 # UniCTF - cube god
 
-这题本质是一个 **2x2 口袋魔方交互题**：服务端每轮随机打乱一个 2x2 魔方（114~514 手），只给出 **6 个面中随机隐藏 1 个面**后的其余 **5 个面贴纸**，要求你在 **1 秒内**输入一串转动，使得打乱后的魔方复原。
-
-关键限制：
-
-- 总共 **100 轮**，全部通过才给 flag。
-- 每轮输入至多 **11 手**（`MAX_MOVES = 11`）。
-- move 语法仅允许：`U, U', U2, D, D', D2, F, F', F2, B, B', B2, L, L', L2, R, R', R2`。
-- 服务端校验方式：用同样的 scramble 把一个新魔方打乱，然后应用你的解，检查是否 solved。
-
-因此，只要能从「5 个面」恢复出当前状态，并给出 **≤11 的解**就稳赢。
-
-本题解只讲“思路/算法/实现要点”，不贴整份代码；仓库里提供的 `solver.cpp` + `exp.py` 就是可工作的参考实现。
+这道题是一个 2x2 魔方交互题，服务端每轮随机打乱魔方，只展示 6 个面中的 5 个面贴纸，要求在 1 秒内输入不超过 11 手的复原步骤，连续通过 100 轮才能拿到 flag。
 
 ---
 
-## 目录
+## 分析
 
-- [题目模型与限制](#题目模型与限制)
-- [核心观察：2x2 角块模型](#核心观察2x2-角块模型)
-- [整体流程](#整体流程)
-- [A. 贴纸坐标与角块映射（必须对齐服务端）](#a-贴纸坐标与角块映射必须对齐服务端)
-- [B. 从 5 个面重建 cp/co（约束搜索）](#b-从-5-个面重建-cpco约束搜索)
-- [C. Move Table：从贴纸置换推导角块转移](#c-move-table从贴纸置换推导角块转移)
-- [D. Pruning Table：单空间最短距离](#d-pruning-table单空间最短距离)
-- [E. IDA*：深度 ≤ 11 的最优/可行解搜索](#e-ida深度--11-的最优可行解搜索)
-- [F. 交互脚本要点（exp.py）](#f-交互脚本要点exppy)
-- [常见踩坑清单](#常见踩坑清单)
+阅读 `app.py` 可以得到题目流程：
 
----
+1. 每轮新建 `RubiksCube2x2`，并执行 `scramble(randint(114, 514))` 打乱。
+2. 随机隐藏一个面，仅输出其余 5 个面的 2x2 贴纸。
+3. 1 秒内输入一行 moves，必须在 `VALID` 集合中，且最多 11 步。
+4. 验证方式：新建 `check_cube`，应用相同 scramble，再应用提交的 moves，要求最后状态 `is_solved()`。
 
-## 题目模型与限制
+因此，本题不是还原 scramble，而是从“打乱后的 5 面投影”直接恢复 solved。
 
-服务端逻辑（见 `app.py`）：
+**关键限制来自源码**：
 
-1. 生成一个新 2x2 魔方 `cube`。
-2. 执行 `scramble = cube.scramble(randint(114,514))`，得到被打乱状态。
-3. 随机隐藏一个面 `hidden`，输出其余 5 个面的 2x2 贴纸。
-4. 你在 1 秒内输入一行 moves（空格分隔），要求：
-  - 每个 token 在 `VALID` 集合内
-  - token 数量 ≤ 11
-5. 校验：新建 `check_cube`，应用相同 scramble，再应用你的 moves，必须 `is_solved()`。
-
-换句话说：你拿到的是 “被打乱后的状态的 5 面投影”，任务是回到 solved。
+- `ROUNDS = 100`，失败即退出。
+- `MAX_MOVES = 11`，超过直接判错。
+- `VALID` 的 move 集合与 2x2 face-turn metric 一致。
+- `signal.alarm(1)` 强制 1 秒交互。
 
 ---
 
-## 核心观察：2x2 角块模型
+## 本地调试
 
-### 1. 2x2 只需要 corner 状态（cp/co）
-
-2x2 没有棱块，只含 8 个角块（corner）。一个 2x2 状态可以表示为：
-
-- `cp`（corner permutation）：8 个角块分别在 8 个位置上的排列，状态数 $8!=40320$。
-- `co`（corner orientation）：每个角块有 3 种朝向；但整体有约束：所有角块朝向之和 $\equiv 0\pmod 3$，状态数 $3^7=2187$。
-
-总状态数约：$40320\times 2187\approx 8.8\times 10^7$。
-
-### 2. 为什么 11 手足够
-
-2x2 在 face-turn metric 下的 God’s number 是 **11**，也就是任意状态都能在 11 手内复原。
-
-所以题目把 `MAX_MOVES` 设置为 11，本质是在逼你写一个真正的 2x2 求解器。
+在本地调试时显然可以绕过 1 秒时限。最简单的方式是在本地把 `signal.alarm(1)` 注释。随后先从数据结构入手：`RubiksCube2x2` 用 6 个 2x2 矩阵表示贴纸，`display()` 固定打印顺序并给出行列顺序。只要把“哪个角块贴在哪些面、哪个坐标”对齐，就能把 5 面投影还原成角块状态。此时先用 Python 写出可用解，再把逻辑迁移到 C++ 提速。
 
 ---
 
-## 整体流程
+## 建模
 
-我们把“每轮求解”拆成 3 个阶段：
+2x2 没有棱块，只包含 8 个角块。一个状态可表示为：
 
-1. **解析 5 个面贴纸**，恢复到角块状态 `(cp, co)`。
-2. 使用预计算的 `MOVE_CP/MOVE_CO` 和 `DIST_CP/DIST_CO` 提供快速转移与启发式。
-3. 用 **IDA\***（迭代加深 A*）在深度 ≤ 11 内找到一条解。
+- `cp`（corner permutation）：8 个角块在 8 个位置上的排列，状态数 $8!=40320$。
+- `co`（corner orientation）：每个角块 3 种朝向，但有整体约束，状态数 $3^7=2187$。
 
-这三步都在 `solver.cpp` 内完成；`exp.py` 只负责读服务端输出、喂给 solver、把解发回去。
+因此角块朝向不变量为：
+
+$$
+\sum_{i=0}^{7} co[i] \equiv 0 \pmod 3
+$$
+
+2x2 的 God’s number 为 11，因此题目设定 `MAX_MOVES = 11` 正好要求“必须写完整求解器”。
 
 ---
 
-## A. 贴纸坐标与角块映射（必须对齐服务端）
+## 从 `display()` 与 move 推断贴纸坐标与角块映射
 
-服务端打印每个面的格式（`display()`）：
+`display()` 输出每个面的格式如下：
 
 ```
 Face U:
@@ -89,25 +59,16 @@ Face U:
 +-----+
 ```
 
-也就是面内坐标：
+因此面内坐标为：
 
-- `(r=0,c=0)` 对应 `a`（第一行第一列）
-- `(0,1)` 对应 `b`
-- `(1,0)` 对应 `c`
-- `(1,1)` 对应 `d`
+- `(0,0)` 对应 a
+- `(0,1)` 对应 b
+- `(1,0)` 对应 c
+- `(1,1)` 对应 d
 
-接下来最关键的是给出 **“每个角块位置 pos，其三张贴纸分别落在哪个面、哪个 (r,c)”**。
+接下来要把 8 个角块位置与三张贴纸的 `(面, r, c)` 对齐。基于 `move_U/move_D/...` 的旋转逻辑可得到如下映射：
 
-2x2 的 8 个角块位置命名（常用约定）：
-
-- 顶层（U层）：URF, UFL, ULB, UBR
-- 底层（D层）：DFR, DLF, DBL, DRB
-
-其中字母含义：例如 URF 表示该角块贴着 U 面、R 面、F 面。
-
-在本题实现里（见 `solver.cpp` 的 `CORNER_FACELETS`），位置到贴纸坐标的映射是：
-
-| 角块位置 | 三面顺序（用于定义 twist） | U/D 面贴纸坐标 | 另两面贴纸坐标 |
+| 角块位置 | 三面顺序（定义朝向） | U/D 面坐标 | 其他两面坐标 |
 |---|---|---|---|
 | URF | (U,R,F) | U(1,1) | R(0,0), F(0,1) |
 | UFL | (U,F,L) | U(1,0) | F(0,0), L(0,1) |
@@ -118,22 +79,13 @@ Face U:
 | DBL | (D,B,L) | D(1,0) | B(1,1), L(1,0) |
 | DRB | (D,R,B) | D(1,1) | R(1,1), B(1,0) |
 
-这个表 **必须** 与服务端 `move_U/move_D/...` 的实现一致；错一格会导致“重建得到的角块状态不可能”，最后报 `reconstruct failed` 或求解输出错误。
-
-> 验证技巧：本地用 `app.py` 打印 solved 魔方（不 scramble），确认每个面都是同字母；再对某一个 move（比如 `U`）手动跑一次，观察哪些贴纸在打印中互换，以此验证坐标对应。
-
 ---
 
-## B. 从 5 个面重建 cp/co（约束搜索）
+## 从 5 面重建 `cp/co`
 
-### 目标与数据结构
+### 角块 ID 约定
 
-我们最终要得到：
-
-- `cp[pos] ∈ {0..7}`：位置 `pos` 上放的是哪个角块（用角块 ID 表示）
-- `co[pos] ∈ {0,1,2}`：这个角块在该位置的朝向（twist）
-
-角块 ID 的定义（见 `solver.cpp` 的 `CUBIES`）：
+角块颜色集合为：
 
 ```
 0: (U,R,F)
@@ -146,359 +98,1105 @@ Face U:
 7: (D,R,B)
 ```
 
-输入只包含 5 个面（缺 1 个面），因此有些贴纸是 unknown。
+### 局部约束
 
-### 第一步：每个位置的局部候选集（只看颜色集合）
+每个位置有 3 张贴纸，对应三面顺序 `CORNER_FACES[pos]`。如果某个面被隐藏，则对应贴纸未知。把已知颜色集合记作 `seen`，候选角块必须满足“颜色集合包含 `seen`”。这样能大幅缩小候选集合。
 
-对每个位置 `pos`，它有 3 张贴纸，对应三面顺序 `CORNER_FACES[pos]`（例如 URF 的顺序是 U/R/F）。
+### 全局 DFS 回溯
 
-我们从输入的 5 面里尝试取这 3 个贴纸：
+仅用局部集合还不够，需要全局约束：
 
-- 如果该面是隐藏面，则该贴纸 unknown
-- 否则贴纸颜色是 `U/D/F/B/L/R` 之一
+- 8 个角块不能重复。
+- 每个候选角块需要尝试 3 种朝向。
 
-把已知颜色收集成集合 `seen(pos)`，例如 `seen={U,R}`。
+为了提速，按“候选数少优先、未知数少优先”排序后回溯。深度只有 8，分支非常小。
 
-那么候选角块必须满足：该角块的三颜色集合包含 `seen`。
+### 朝向定义与匹配
 
-这一步在 `solver.cpp` 里是 `is_in_cubie(cubie_id, char color)` 的组合过滤。
+`co[pos]` 定义为：按 `CORNER_FACES[pos]` 顺序，U/D 贴纸落在第几个槽位（0/1/2）。
 
-### 第二步：全局一致性（DFS/回溯）
-
-仅用集合过滤还不够（因为不考虑朝向、也不考虑每个贴纸落在哪个面），接下来做全局 DFS：
-
-- 每个位置从 `cands[pos]` 里挑一个 cubie
-- 保证 8 个 cubie 互不重复（`used[cubie]=true`）
-- 对每个 (pos,cubie) 再枚举 3 种 twist，看是否匹配已知贴纸
-
-为提速，采用“最受限优先”排序：
-
-1. 候选数少的 pos 优先
-2. unknown 更少的 pos 优先
-
-这样回溯深度虽为 8，但分支极小，通常瞬间出解。
-
-### 只看到 5 个面时的约束
-
-隐藏 1 个面会导致 4 个贴纸未知，但每个角块有 3 个贴纸——实际会出现：
-
-- 有些角块 3 贴纸全可见（强约束）
-- 有些角块缺 1 贴纸（仍然能用 “颜色集合” 缩小候选）
-
-做法：对每个角块位置 pos：
-
-1. 读取该位置 3 个贴纸的已知颜色（来自 5 个面）；未知的记为 `None/optional`。
-2. 先用“颜色集合包含关系”筛掉不可能的 cubie：
-   - 如果已知颜色集合 seen = {U,R}，那么候选 cubie 必须包含 U 和 R。
-3. 得到 `cands[pos]` 后，在全局做 DFS/backtracking，把 8 个 cubie 分配到 8 个位置（不可重复）。
-
-### twist（co）的定义与 `colors_with_twist` 推导
-
-这题最容易踩坑的是：`co`（twist）的定义必须和 move table 推导一致。
-
-`solver.cpp` 的定义是：
-
-> `co[pos] = 角块三面(按 CORNER_FACES[pos] 顺序)中，U/D 颜色落在第几个槽位 (0/1/2)`
-
-也就是：假设该位置的面序是 (U,R,F)，那么
-
-- 如果 U/D 贴纸在第 0 个（U 面），twist=0
-- 在第 1 个（R 面），twist=1
-- 在第 2 个（F 面），twist=2
-
-本题把 twist 定义为：
-
-> $co[pos] =$ 在 `CORNER_FACES[pos]` 的三面顺序中，U/D 颜色落在哪个槽位（0/1/2）。
-
-例如 URF 的面序是 (U,R,F)：
-
-- U/D 在 U 面槽位 → twist=0
-- U/D 在 R 面槽位 → twist=1
-- U/D 在 F 面槽位 → twist=2
-
-为了在 DFS 检查“某 cubie 以某 twist 放到某 pos 是否匹配”，需要生成该 cubie 在该 twist 下的三面颜色序列。
-
-设 `CUBIES[cub] = (x0,x1,x2)` 是该角块的基准顺序（基准顺序与 `CORNER_FACES` 一致：第 0 个必为 U 或 D），
-我们希望 U/D 颜色出现在 index = twist。
-
-把三元组做循环移位即可：
+设角块基准顺序为 `base=(x0,x1,x2)`，其中第 0 个必为 U 或 D。要让 U/D 贴纸出现在 `twist` 位置，可以做循环移位：
 
 $$
 cols[i] = base[(i - twist)\bmod 3]
 $$
 
-`solver.cpp` 里写成：
+然后逐槽位匹配已知颜色即可。
 
-```cpp
-int k = (3 - (twist % 3)) % 3;
-return { base[k], base[(k + 1) % 3], base[(k + 2) % 3] };
-```
+### 朝向和的约束
 
-这与 Python 版 `exp.py.bak` 的 `k = (-twist)%3` 是同一意思。
+DFS 结束时必须满足：
 
-然后 `fits(pos,cub,twist)` 就是逐个槽位 i 比对：若 `need[pos][i]` 已知，则必须等于 `cols[i]`。
+$$
+\sum co[i] \equiv 0 \pmod 3
+$$
 
-### 为什么要有 “twist parity” 约束
-
-2x2 的角块朝向并非独立：
-
-$$\sum_{i=0}^{7} co[i] \equiv 0 \pmod 3$$
-
-这是魔方群的基本不变量：任何合法转动都会保持该等式。
-
-因此 DFS 到底时必须检查这个条件，否则可能得到一个“贴纸上看起来匹配，但实际上不可达”的组合。
-
-在实现里：
-
-- DFS 结束时检查 sum%3==0
-- 或者直接让第 8 个角块朝向由前 7 个决定：`co[7] = (-sum(co[0..6])) mod 3`
-
-$$\sum_{i=0}^{7} co[i] \equiv 0 \pmod 3$$
-
-并据此修正最后一个角块的 twist。
-
-### 伪代码（重建）
-
-```
-for pos in 0..7:
-  need[pos][i] = facelet color if that face is shown else UNKNOWN
-  seen = { all known colors in need[pos] }
-  cands[pos] = { cubie | cubie colorset contains seen }
-
-order = positions sorted by (len(cands[pos]), number_of_UNKNOWN)
-
-dfs(i):
-  if i==8:
-    return sum(co)%3==0
-  pos = order[i]
-  for cub in cands[pos] where not used[cub]:
-    for twist in {0,1,2}:
-      if fits(pos,cub,twist):
-        used[cub]=true; cp[pos]=cub; co[pos]=twist
-        if dfs(i+1): return true
-        rollback
-  return false
-```
-
-> 实战中：只要坐标映射对齐服务端，5 面信息通常足够唯一确定状态。
+或者直接让第 8 个角块朝向由前 7 个决定，保证合法性。
 
 ---
 
-## C. Move Table：从贴纸置换推导角块转移
+## Move Table：从贴纸置换推导角块转移
 
-为了做到每轮毫秒级求解，需要把“状态转移”做成数组查表。
+为了连续解 100 轮，每轮在 1 秒内完成，必须预计算表。
 
-### 24 贴纸编号方案（facelet indexing）
+### 24 贴纸编号
 
-固定一个 24 贴纸索引，把每个面 2x2 展平：
+按面顺序 U/D/F/B/L/R，每个面 2x2 展平成 4 个编号，总计 24 个贴纸：
 
-- U 面 4 个贴纸编号：0..3
-- D 面：4..7
-- F 面：8..11
-- B 面：12..15
-- L 面：16..19
-- R 面：20..23
+- U: 0..3
+- D: 4..7
+- F: 8..11
+- B: 12..15
+- L: 16..19
+- R: 20..23
 
-并且面内的 `(r,c)` 映射为 `r*2+c`。
+定义：
 
-即：
+$$
+facelet\_idx(face,r,c)=base(face)+r\cdot2+c
+$$
 
-$$facelet\_idx(face,r,c) = base(face) + (r\cdot 2 + c)$$
+### 计算 `perm24`
 
-`solver.cpp` 的 `facelet_idx()` 函数就是这个定义。
-
-### Sticker 级 24 贴纸模型生成 move 的置换
-
-2x2 每个面 2x2，一共 6 个面 => 24 个贴纸。
-
-`solver.cpp` 构建一个 `StickerCube2x2`：
-
-- 初始化时每个贴纸填充自身编号 0..23。
-- 对每个 move（18 种）执行一次，得到一个 24 长度的置换 `perm24`。
-
-这里 `perm24` 的含义要非常明确：
+构造一个贴纸级魔方，初始化每个贴纸为自己的编号。对每个 move 执行一次，得到置换 `perm24`，并约定：
 
 > `new[i] = old[perm24[i]]`
 
-也就是“move 之后第 i 个位置来自 move 之前的哪个位置”。
+方向必须要统一，否则后续推导会反。
 
-这样应用置换就只是：
+### 推导 corner 置换与朝向变化
 
-```cpp
-out[i] = st[perm[i]];
-```
+固定每个角块位置的 3 个贴纸索引（按 `CORNER_FACES` 顺序）。对每个 move：
 
-这套定义能保证后续推导 corner 转移时不会反。
+1. `moved24 = apply_perm24(solved24, perm24)`。
+2. 取 `new_pos` 的 3 个贴纸组成 `triple`，其集合必对应某个 `old_pos`。
+3. 用三贴纸集合的 bitmask 快速定位 `old_pos`。
+4. `twist_of_corner(triple)` 通过“U/D 贴纸落在 triple 中的位置”给出朝向增量。
 
-### 从 perm24 推导 corner 的置换与朝向变化
-
-预先固定每个 corner position 对应 3 个贴纸索引（`CORNER_FACELETS_IDX[pos]`）。
-
-对于某个 move：
-
-对每个 corner position，我们知道它由 3 个 facelet 组成（按 `CORNER_FACES[pos]` 的顺序），例如：
-
-```
-URF = (U(1,1), R(0,0), F(0,1))
-```
-
-对应 24 贴纸索引三元组 `CORNER_FACELETS_IDX[pos]`。
-
-对某个 move：
-
-1. 先求 `moved24 = apply_perm24(solved24, perm24)`，得到 move 后每个位置装着哪个旧编号。
-2. 对每个 `new_pos`，取它的三元组 `(moved24[a], moved24[b], moved24[c])`。
-3. 这三元组对应的是 **某个 old_pos 的三贴纸集合**。为了快速匹配，用 bitmask：
-
-$$mask(triple)=2^{t_0}+2^{t_1}+2^{t_2}$$
-
-对每个 old_pos 预先算好 mask，这样 `new_pos` 就能通过 mask 相等找到 `old_pos`。
-
-4. 朝向变化：用 `twist_of_corner(triple)` 计算 U/D 贴纸在 triple 中出现的位置（0/1/2），它就是“扭转增量”。
-
-注意：这里的 `triple` 里存的是旧贴纸编号；而 U/D 面贴纸编号范围在 0..7，因此 `twist_of_corner` 的判定是“哪个元素落在 0..7”。
-
-这样就能得到：
-
-- `MOVE_CP[mi][cp_idx]`：cp 走一步后的新 cp 索引
-- `MOVE_CO[mi][co_idx]`：co 走一步后的新 co 索引
+这样得到 `MOVE_CP` 和 `MOVE_CO` 转移表。
 
 ---
 
-## D. Pruning Table：单空间最短距离
+## Pruning Table：单空间最短距离
 
-我们分别在两个“投影空间”上做 BFS：
-
-- 只看 cp（40320 个状态）
-- 只看 co（2187 个状态）
-
-从 solved（idx=0）出发，用 18 种 move 扩展，得到每个 idx 到 solved 的最短步数。
-
-这个距离是严格的“下界”：
-
-- 任意完整状态要复原，至少要把它的 cp 修回去，至少需要 `DIST_CP[cp_idx]` 步。
-- 同理至少需要 `DIST_CO[co_idx]` 步。
-
-因此它们可用于 IDA* 的启发式剪枝。
-
-分别对 cp 空间（40320）和 co 空间（2187）做 BFS，得到：
+对 `cp` 空间（40320）与 `co` 空间（2187）分别 BFS，得到：
 
 - `DIST_CP[cp_idx]`
 - `DIST_CO[co_idx]`
 
-它们作为 IDA* 的启发式下界。
-
-### 缓存
-
-第一次生成表会花一点时间，因此把所有表写入 `cube2x2_tables.bin`，后续直接加载。
+它们是完整状态的下界，用于启发式剪枝。第一次生成耗时较长，所以写入缓存文件方便调用（这里我选择 `cube2x2_tables.bin`），后续直接加载即可。
 
 ---
 
-## E. IDA*：深度 ≤ 11 的最优/可行解搜索
+## IDA*：深度不超过 11 的搜索
 
-状态是 `(cp_idx, co_idx)`。
+状态为 `(cp_idx, co_idx)`。启发式使用：
 
-### 启发函数（h）
+$$
+h=\max\left(d_{cp}, d_{co}, \left\lfloor\frac{d_{cp}+d_{co}}{2}\right\rfloor\right)
+$$
 
-最常见且安全的做法是 `h = max(DIST_CP, DIST_CO)`；本实现额外加了一个平均项以加强剪枝：
+迭代加深 DFS，直到深度 ≤ 11。剪枝策略：
 
-$$h=\max\left(d_{cp}, d_{co}, \left\lfloor\frac{d_{cp}+d_{co}}{2}\right\rfloor\right)$$
+- 不连续转同一面。
+- 不走上一手的逆操作。
 
-其直觉是：有时候 cp 和 co 都“差得多”，真实距离往往大于单纯的 max；平均项可以更接近真实值，从而减少搜索节点。
-
-IDA* 的流程：
-
-1. 初始 bound = h(start)
-2. 在 bound 内做深度优先搜索（DFS），只扩展使得 `g + h <= bound` 的节点
-3. 若没找到解，则 bound++ 继续
-4. 直到 bound > 11 结束（理论上不会；因为 God’s number=11）
-
-### 分支剪枝（不影响可解性）
-
-- 不允许连续两步转同一面（例如上一手是 U，则下一手不再扩展 U/U2/U'）。
-- 不走“上一手的逆操作”（例如上一手是 U，则下一手跳过 U'；U2 的逆是自身）。
-
-这些剪枝不会漏解：
-
-- 连续转同一面可以合并成一步（例如 `U U` 等价于 `U2`，`U U'` 等价于无操作）。
-- 紧跟逆操作更是显然冗余。
-
-因此搜索仍覆盖所有最短解/可行解，节点数却大幅下降。
-
-### 复杂度直觉
-
-最坏情况下分支因子约为 6 面 * 3 = 18，但剪枝后平均会小很多（通常接近 12 左右）；深度最多 11。
-再乘上启发式剪枝后，实际搜索规模可以控制在非常小的量级，满足 1 秒交互。
-
-由于 2x2 的最优解深度上限就是 11，IDA* 在这个问题上非常合适。
+这样搜索节点数就能大幅下降。
 
 ---
 
+## 先写 Python 解，再迁移 C++
+
+### Python 版本
+
+Python 版本用于验证思路：
+
+1. 解析 5 个面贴纸。
+2. 用 DFS 重建 `cp/co`。
+3. 利用预计算的 move/pruning 表进行 IDA* 求解。
+
+该版本重点在正确性与可读性，保证每一轮都能给出 ≤ 11 的解即可，耗时在十几秒内都可以接受。
+
+### C++ 版本
+
+将 Python 逻辑等价迁移到 C++，保持相同的状态定义与启发式：
+
+- 仍然构造 `perm24`，推导 `MOVE_CP/MOVE_CO`。
+- 仍然 BFS 构建 `DIST_CP/DIST_CO`。
+- 仍然用 IDA* 深度 ≤ 11 搜索。
+
+为减少启动开销，C++ 版本将表缓存到二进制文件，并实现一个轻量协议：`BEGIN ... END` 输入 5 面，输出一行解。这样在交互脚本中可以常驻调用，避免每轮重启。
+
 ---
 
-## F. 交互脚本要点（exp.py）
+## exp
 
-`exp.py` 的关键目标是：把服务端每轮输出的 5 张面，快速喂给本地求解器，然后把解送回去。
+Python 交互脚本：
 
-### 输出解析
+```python
+#!/usr/bin/env python3
+from pwn import *
+import time
 
-每个 face block 的格式固定：
+context.log_level = "info"
 
-1. `Face X:`
-2. `+-----+`
-3. `| a b |`
-4. `| c d |`
-5. `+-----+`
 
-因此用 `recvline()` 连续读 5 行即可；`parse_row()` 把 `|` 去掉后按空格 split 得到两个 token。
+# ---------- parse server output: 5 face blocks ----------
+def recv_face_block(io):
+    line = io.recvline().decode()
+    if not line.startswith("Face "):
+        raise EOFError("Unexpected output: " + line)
+    face = line.split()[1].strip(":")
+    io.recvline()  # +-----+
+    row1 = io.recvline().decode().strip()
+    row2 = io.recvline().decode().strip()
+    io.recvline()  # +-----+
 
-### solver 子进程协议
+    def parse_row(s):
+        return s.strip("|").strip().split()
 
-为了避免每轮都重新启动 solver（启动进程 + 读取缓存会很慢），脚本使用 **常驻子进程**：
+    mat = [parse_row(row1), parse_row(row2)]  # 2x2 strings
+    return face, mat
 
-- 启动一次 `./solver`
-- 每轮发送：
 
+def mat_to_tokens(mat):
+    # mat: [[a,b],[c,d]]
+    return mat[0][0], mat[0][1], mat[1][0], mat[1][1]
+
+
+# ---------- bridge to C++ solver ----------
+class SolverBridge:
+    def __init__(self, path="./solver"):
+        self.p = process([path])
+
+    def solve_from_partial(self, partial):
+        """
+        partial: dict face(str)-> mat([[..],[..]])
+        """
+        self.p.sendline(b"BEGIN")
+        for face, mat in partial.items():
+            a, b, c, d = mat_to_tokens(mat)
+            line = f"{face} {a} {b} {c} {d}"
+            self.p.sendline(line.encode())
+        self.p.sendline(b"END")
+        sol = self.p.recvline().decode().strip()
+        return sol
+
+
+# ---------- per round ----------
+def solve_round(io, bridge):
+    partial = {}
+    for _ in range(5):
+        f, mat = recv_face_block(io)
+        partial[f] = mat
+
+    io.recvuntil(b"Enter your solution:\n")
+    sol = bridge.solve_from_partial(partial)
+    if not sol:
+        sol = "U"
+    return sol
+
+
+io = remote("localhost", 9999)
+# io = process(["python3", "app.py"])
+
+bridge = SolverBridge("./solver")
+
+io.recvuntil(b"get the flag!\n")
+
+t_all = time.time()
+for rnd in range(100):
+    io.recvuntil(b"=== Round ")
+    io.recvline()
+    io.recvline()
+
+    t0 = time.time()
+    sol = solve_round(io, bridge)
+    dt = (time.time() - t0) * 1000.0
+    log.info(f"Round {rnd+1}/100 sol_len={len(sol.split())} time={dt:.2f}ms")
+
+    io.sendline(sol.encode())
+
+    line = io.recvline().decode(errors="ignore")
+    if "[-]" in line:
+        log.error("Rejected: " + line)
+        log.error(io.recvall().decode(errors="ignore"))
+        exit(1)
+    io.recvline()
+
+log.success(f"Done in {time.time()-t_all:.2f}s")
+io.interactive()
 ```
-BEGIN
-U a b c d
-F a b c d
-...
-END
+
+C++ 求解器：
+
+```cpp
+#include <bits/stdc++.h>
+
+using namespace std;
+
+// ============================================================================
+// 2x2 solver core (corner-only) + simple stdin/stdout protocol
+//
+// Protocol (one case):
+//   BEGIN
+//   U a b c d
+//   F a b c d
+//   ... (5 faces total, order arbitrary)
+//   END
+// Outputs one line: "U R2 F' ..." (or "U" fallback)
+//
+// This build is mac/arm64 safe:
+// - NO unordered_map<string,int> (avoids std::hash<string> -> __hash_memory link issues)
+// - clang-friendly array init
+// ============================================================================
+
+static const char *CACHE_FILE = "cube2x2_tables.bin";
+
+enum CornerPos {
+	URF = 0,
+	UFL = 1,
+	ULB = 2,
+	UBR = 3,
+	DFR = 4,
+	DLF = 5,
+	DBL = 6,
+	DRB = 7
+};
+
+struct RC {
+	int r, c;
+};
+
+// Corner cubies by color set
+static const array<array<char, 3>, 8> CUBIES = { { { { 'U', 'R', 'F' } },
+						   { { 'U', 'F', 'L' } },
+						   { { 'U', 'L', 'B' } },
+						   { { 'U', 'B', 'R' } },
+						   { { 'D', 'F', 'R' } },
+						   { { 'D', 'L', 'F' } },
+						   { { 'D', 'B', 'L' } },
+						   { { 'D', 'R', 'B' } } } };
+
+// For each position, the faces order we use for orientation definition
+static const array<array<char, 3>, 8> CORNER_FACES = CUBIES;
+
+// MUST match server printed facelet layout (r,c).
+static const array<unordered_map<char, RC>, 8> CORNER_FACELETS = [] {
+	array<unordered_map<char, RC>, 8> m;
+	m[URF] = { { { 'U', { 1, 1 } }, { 'R', { 0, 0 } }, { 'F', { 0, 1 } } } };
+	m[UFL] = { { { 'U', { 1, 0 } }, { 'F', { 0, 0 } }, { 'L', { 0, 1 } } } };
+	m[ULB] = { { { 'U', { 0, 0 } }, { 'L', { 0, 0 } }, { 'B', { 0, 1 } } } };
+	m[UBR] = { { { 'U', { 0, 1 } }, { 'B', { 0, 0 } }, { 'R', { 0, 1 } } } };
+	m[DFR] = { { { 'D', { 0, 1 } }, { 'F', { 1, 1 } }, { 'R', { 1, 0 } } } };
+	m[DLF] = { { { 'D', { 0, 0 } }, { 'L', { 1, 1 } }, { 'F', { 1, 0 } } } };
+	m[DBL] = { { { 'D', { 1, 0 } }, { 'B', { 1, 1 } }, { 'L', { 1, 0 } } } };
+	m[DRB] = { { { 'D', { 1, 1 } }, { 'R', { 1, 1 } }, { 'B', { 1, 0 } } } };
+	return m;
+}();
+
+// Move list MUST match indices used later
+static const vector<string> MOVES = { "U", "U'", "U2", "D", "D'", "D2",
+				      "F", "F'", "F2", "B", "B'", "B2",
+				      "L", "L'", "L2", "R", "R'", "R2" };
+
+// Move indices by face
+static const array<array<int, 3>, 6> MOVES_BY_FACE_IDX = {
+	{ /* U */ { 0, 2, 1 },
+	  /* D */ { 3, 5, 4 },
+	  /* F */ { 6, 8, 7 },
+	  /* B */ { 9, 11, 10 },
+	  /* L */ { 12, 14, 13 },
+	  /* R */ { 15, 17, 16 } }
+};
+
+static inline string inv_move(const string &m)
+{
+	if (!m.empty() && m.back() == '2')
+		return m;
+	if (!m.empty() && m.back() == '\'')
+		return m.substr(0, m.size() - 1);
+	return m + "'";
+}
+static inline bool is_inverse(const string &a, const string &b)
+{
+	return inv_move(a) == b;
+}
+
+// Factorials for perm index
+static const int FACT[9] = { 1, 1, 2, 6, 24, 120, 720, 5040, 40320 };
+
+// perm <-> idx (Lehmer code)
+static inline int perm_to_idx(const array<int, 8> &p)
+{
+	int idx = 0;
+	for (int i = 0; i < 8; i++) {
+		int smaller = 0;
+		for (int j = i + 1; j < 8; j++)
+			if (p[j] < p[i])
+				smaller++;
+		idx += smaller * FACT[7 - i];
+	}
+	return idx;
+}
+static inline array<int, 8> idx_to_perm(int idx)
+{
+	array<int, 8> p{};
+	array<int, 8> elems{};
+	for (int i = 0; i < 8; i++)
+		elems[i] = i;
+	int n = 8;
+	for (int i = 0; i < 8; i++) {
+		int f = FACT[7 - i];
+		int q = idx / f;
+		idx %= f;
+		p[i] = elems[q];
+		for (int k = q; k < n - 1; k++)
+			elems[k] = elems[k + 1];
+		n--;
+	}
+	return p;
+}
+
+// orientation <-> idx (base-3, last determined)
+static inline int ori_to_idx(const array<int, 8> &co)
+{
+	int idx = 0;
+	for (int i = 0; i < 7; i++)
+		idx = idx * 3 + co[i];
+	return idx;
+}
+static inline array<int, 8> idx_to_ori(int idx)
+{
+	array<int, 8> co{};
+	int s = 0;
+	for (int i = 6; i >= 0; i--) {
+		co[i] = idx % 3;
+		idx /= 3;
+		s += co[i];
+	}
+	co[7] = (3 - (s % 3)) % 3;
+	return co;
+}
+
+// ---------------------------------------------------------------------------
+// Sticker-level cube (for generating perm24 of each move)
+// ---------------------------------------------------------------------------
+struct StickerCube2x2 {
+	array<array<array<int, 2>, 2>, 6> f;
+
+	static int fid(char c)
+	{
+		return (int)string("UDFBLR").find(c);
+	}
+	StickerCube2x2()
+	{
+		for (int k = 0; k < 6; k++)
+			for (int r = 0; r < 2; r++)
+				for (int c = 0; c < 2; c++)
+					f[k][r][c] = k;
+	}
+
+	// clang-friendly (no nested brace init that clang dislikes)
+	static array<array<int, 2>, 2> rot_cw(const array<array<int, 2>, 2> &a)
+	{
+		array<array<int, 2>, 2> o{};
+		o[0][0] = a[1][0];
+		o[0][1] = a[0][0];
+		o[1][0] = a[1][1];
+		o[1][1] = a[0][1];
+		return o;
+	}
+	static array<array<int, 2>, 2> rot_ccw(const array<array<int, 2>, 2> &a)
+	{
+		array<array<int, 2>, 2> o{};
+		o[0][0] = a[0][1];
+		o[0][1] = a[1][1];
+		o[1][0] = a[0][0];
+		o[1][1] = a[1][0];
+		return o;
+	}
+
+	array<int, 2> get_row(int id, int r) const
+	{
+		return { f[id][r][0], f[id][r][1] };
+	}
+	void set_row(int id, int r, const array<int, 2> &v)
+	{
+		f[id][r][0] = v[0];
+		f[id][r][1] = v[1];
+	}
+	array<int, 2> get_col(int id, int c) const
+	{
+		return { f[id][0][c], f[id][1][c] };
+	}
+	void set_col(int id, int c, const array<int, 2> &v)
+	{
+		f[id][0][c] = v[0];
+		f[id][1][c] = v[1];
+	}
+
+	void move_U(bool p)
+	{
+		int U = 0, F = 2, B = 3, L = 4, R = 5;
+		if (p) {
+			f[U] = rot_ccw(f[U]);
+			auto t = get_row(F, 0);
+			set_row(F, 0, get_row(L, 0));
+			set_row(L, 0, get_row(B, 0));
+			set_row(B, 0, get_row(R, 0));
+			set_row(R, 0, t);
+		} else {
+			f[U] = rot_cw(f[U]);
+			auto t = get_row(F, 0);
+			set_row(F, 0, get_row(R, 0));
+			set_row(R, 0, get_row(B, 0));
+			set_row(B, 0, get_row(L, 0));
+			set_row(L, 0, t);
+		}
+	}
+	void move_D(bool p)
+	{
+		int D = 1, F = 2, B = 3, L = 4, R = 5;
+		if (p) {
+			f[D] = rot_ccw(f[D]);
+			auto t = get_row(F, 1);
+			set_row(F, 1, get_row(R, 1));
+			set_row(R, 1, get_row(B, 1));
+			set_row(B, 1, get_row(L, 1));
+			set_row(L, 1, t);
+		} else {
+			f[D] = rot_cw(f[D]);
+			auto t = get_row(F, 1);
+			set_row(F, 1, get_row(L, 1));
+			set_row(L, 1, get_row(B, 1));
+			set_row(B, 1, get_row(R, 1));
+			set_row(R, 1, t);
+		}
+	}
+	void move_F(bool p)
+	{
+		int U = 0, D = 1, F = 2, L = 4, R = 5;
+		if (p) {
+			f[F] = rot_ccw(f[F]);
+			auto t = get_row(U, 1);
+			set_row(U, 1, get_col(R, 0));
+			auto d0 = get_row(D, 0);
+			set_col(R, 0, { d0[1], d0[0] });
+			set_row(D, 0, get_col(L, 1));
+			set_col(L, 1, { t[1], t[0] });
+		} else {
+			f[F] = rot_cw(f[F]);
+			auto t = get_row(U, 1);
+			auto lc = get_col(L, 1);
+			set_row(U, 1, { lc[1], lc[0] });
+			set_col(L, 1, get_row(D, 0));
+			auto rc = get_col(R, 0);
+			set_row(D, 0, { rc[1], rc[0] });
+			set_col(R, 0, t);
+		}
+	}
+	void move_B(bool p)
+	{
+		int U = 0, D = 1, B = 3, L = 4, R = 5;
+		if (p) {
+			f[B] = rot_ccw(f[B]);
+			auto t = get_row(U, 0);
+			auto lc = get_col(L, 0);
+			set_row(U, 0, { lc[1], lc[0] });
+			set_col(L, 0, get_row(D, 1));
+			auto rc = get_col(R, 1);
+			set_row(D, 1, { rc[1], rc[0] });
+			set_col(R, 1, t);
+		} else {
+			f[B] = rot_cw(f[B]);
+			auto t = get_row(U, 0);
+			set_row(U, 0, get_col(R, 1));
+			auto d1 = get_row(D, 1);
+			set_col(R, 1, { d1[1], d1[0] });
+			set_row(D, 1, get_col(L, 0));
+			set_col(L, 0, { t[1], t[0] });
+		}
+	}
+	void move_L(bool p)
+	{
+		int U = 0, D = 1, F = 2, B = 3, L = 4;
+		if (p) {
+			f[L] = rot_ccw(f[L]);
+			auto t = get_col(U, 0);
+			set_col(U, 0, get_col(F, 0));
+			set_col(F, 0, get_col(D, 0));
+			auto bc = get_col(B, 1);
+			set_col(D, 0, { bc[1], bc[0] });
+			set_col(B, 1, { t[1], t[0] });
+		} else {
+			f[L] = rot_cw(f[L]);
+			auto t = get_col(U, 0);
+			auto bc = get_col(B, 1);
+			set_col(U, 0, { bc[1], bc[0] });
+			auto dc = get_col(D, 0);
+			set_col(B, 1, { dc[1], dc[0] });
+			set_col(D, 0, get_col(F, 0));
+			set_col(F, 0, t);
+		}
+	}
+	void move_R(bool p)
+	{
+		int U = 0, D = 1, F = 2, B = 3, R = 5;
+		if (p) {
+			f[R] = rot_ccw(f[R]);
+			auto t = get_col(U, 1);
+			auto bc = get_col(B, 0);
+			set_col(U, 1, { bc[1], bc[0] });
+			auto dc = get_col(D, 1);
+			set_col(B, 0, { dc[1], dc[0] });
+			set_col(D, 1, get_col(F, 1));
+			set_col(F, 1, t);
+		} else {
+			f[R] = rot_cw(f[R]);
+			auto t = get_col(U, 1);
+			set_col(U, 1, get_col(F, 1));
+			set_col(F, 1, get_col(D, 1));
+			auto bc = get_col(B, 0);
+			set_col(D, 1, { bc[1], bc[0] });
+			set_col(B, 0, { t[1], t[0] });
+		}
+	}
+
+	void apply_move(const string &m)
+	{
+		if (!m.empty() && m.back() == '2') {
+			string b = m.substr(0, m.size() - 1);
+			apply_move(b);
+			apply_move(b);
+			return;
+		}
+		bool prime = (!m.empty() && m.back() == '\'');
+		char face = m[0];
+		switch (face) {
+		case 'U':
+			move_U(prime);
+			break;
+		case 'D':
+			move_D(prime);
+			break;
+		case 'F':
+			move_F(prime);
+			break;
+		case 'B':
+			move_B(prime);
+			break;
+		case 'L':
+			move_L(prime);
+			break;
+		case 'R':
+			move_R(prime);
+			break;
+		default:
+			break;
+		}
+	}
+};
+
+// facelet indexing for 24 stickers (U D F B L R each 2x2)
+static inline int facelet_idx(char face, int r, int c)
+{
+	int base = 0;
+	switch (face) {
+	case 'U':
+		base = 0;
+		break;
+	case 'D':
+		base = 4;
+		break;
+	case 'F':
+		base = 8;
+		break;
+	case 'B':
+		base = 12;
+		break;
+	case 'L':
+		base = 16;
+		break;
+	case 'R':
+		base = 20;
+		break;
+	default:
+		base = 0;
+		break;
+	}
+	return base + (r * 2 + c);
+}
+
+// which 3 stickers form each corner position (in CORNER_FACES order)
+static const array<array<int, 3>, 8> CORNER_FACELETS_IDX = {
+	{ { { facelet_idx('U', 1, 1), facelet_idx('R', 0, 0),
+	      facelet_idx('F', 0, 1) } },
+	  { { facelet_idx('U', 1, 0), facelet_idx('F', 0, 0),
+	      facelet_idx('L', 0, 1) } },
+	  { { facelet_idx('U', 0, 0), facelet_idx('L', 0, 0),
+	      facelet_idx('B', 0, 1) } },
+	  { { facelet_idx('U', 0, 1), facelet_idx('B', 0, 0),
+	      facelet_idx('R', 0, 1) } },
+	  { { facelet_idx('D', 0, 1), facelet_idx('F', 1, 1),
+	      facelet_idx('R', 1, 0) } },
+	  { { facelet_idx('D', 0, 0), facelet_idx('L', 1, 1),
+	      facelet_idx('F', 1, 0) } },
+	  { { facelet_idx('D', 1, 0), facelet_idx('B', 1, 1),
+	      facelet_idx('L', 1, 0) } },
+	  { { facelet_idx('D', 1, 1), facelet_idx('R', 1, 1),
+	      facelet_idx('B', 1, 0) } } }
+};
+
+// orientation delta: where the U/D sticker ends up (0/1/2)
+static inline int twist_of_corner(const array<int, 3> &triple)
+{
+	for (int i = 0; i < 3; i++)
+		if (0 <= triple[i] && triple[i] <= 7)
+			return i;
+	throw runtime_error("invalid corner triple");
+}
+static inline uint32_t mask3(const array<int, 3> &a)
+{
+	return (1u << a[0]) | (1u << a[1]) | (1u << a[2]);
+}
+
+// Move/pruning tables
+static vector<array<uint16_t, 40320> > MOVE_CP; // [18][40320]
+static vector<array<uint16_t, 2187> > MOVE_CO; // [18][2187]
+static vector<uint8_t> DIST_CP; // [40320]
+static vector<uint8_t> DIST_CO; // [2187]
+
+// Build perm24 for a move: new[i] = old[perm[i]]
+static vector<int> build_perm24_for_move(const string &m)
+{
+	StickerCube2x2 c;
+	int idx = 0;
+	for (char fc : string("UDFBLR")) {
+		int id = StickerCube2x2::fid(fc);
+		for (int r = 0; r < 2; r++)
+			for (int col = 0; col < 2; col++)
+				c.f[id][r][col] = idx++;
+	}
+	c.apply_move(m);
+	vector<int> perm;
+	perm.reserve(24);
+	for (char fc : string("UDFBLR")) {
+		int id = StickerCube2x2::fid(fc);
+		for (int r = 0; r < 2; r++)
+			for (int col = 0; col < 2; col++)
+				perm.push_back(c.f[id][r][col]);
+	}
+	return perm;
+}
+static inline array<int, 24> apply_perm24(const array<int, 24> &st,
+					  const vector<int> &perm)
+{
+	array<int, 24> out{};
+	for (int i = 0; i < 24; i++)
+		out[i] = st[perm[i]];
+	return out;
+}
+
+static void build_corner_move_tables()
+{
+	MOVE_CP.assign(MOVES.size(), {});
+	MOVE_CO.assign(MOVES.size(), {});
+
+	array<uint32_t, 8> corner_masks{};
+	for (int pos = 0; pos < 8; pos++)
+		corner_masks[pos] = mask3(CORNER_FACELETS_IDX[pos]);
+
+	vector<vector<int> > perm24_list;
+	perm24_list.reserve(MOVES.size());
+	for (auto &m : MOVES)
+		perm24_list.push_back(build_perm24_for_move(m));
+
+	array<int, 24> solved24{};
+	for (int i = 0; i < 24; i++)
+		solved24[i] = i;
+
+	for (int mi = 0; mi < (int)MOVES.size(); mi++) {
+		auto moved24 = apply_perm24(solved24, perm24_list[mi]);
+
+		array<int, 8> newpos_to_oldpos{};
+		array<int, 8> twist_delta_by_oldpos{};
+		twist_delta_by_oldpos.fill(0);
+
+		// Determine how corners permute + how orientation changes
+		for (int new_pos = 0; new_pos < 8; new_pos++) {
+			auto idxs = CORNER_FACELETS_IDX[new_pos];
+			array<int, 3> triple = { moved24[idxs[0]],
+						 moved24[idxs[1]],
+						 moved24[idxs[2]] };
+			uint32_t msk = mask3(triple);
+
+			int old_pos = -1;
+			for (int p = 0; p < 8; p++)
+				if (corner_masks[p] == msk) {
+					old_pos = p;
+					break;
+				}
+			if (old_pos < 0)
+				throw runtime_error("corner mask not found");
+
+			newpos_to_oldpos[new_pos] = old_pos;
+			twist_delta_by_oldpos[old_pos] =
+				twist_of_corner(triple);
+		}
+
+		// cp transition table
+		for (int pidx = 0; pidx < 40320; pidx++) {
+			auto cp_state = idx_to_perm(pidx);
+			array<int, 8> new_cp{};
+			for (int new_pos = 0; new_pos < 8; new_pos++) {
+				int old_pos = newpos_to_oldpos[new_pos];
+				new_cp[new_pos] = cp_state[old_pos];
+			}
+			MOVE_CP[mi][pidx] = (uint16_t)perm_to_idx(new_cp);
+		}
+
+		// co transition table
+		for (int oidx = 0; oidx < 2187; oidx++) {
+			auto co_state = idx_to_ori(oidx);
+			array<int, 8> new_co{};
+			for (int new_pos = 0; new_pos < 8; new_pos++) {
+				int old_pos = newpos_to_oldpos[new_pos];
+				new_co[new_pos] =
+					(co_state[old_pos] +
+					 twist_delta_by_oldpos[old_pos]) %
+					3;
+			}
+			// fix last corner orientation
+			int s = 0;
+			for (int i = 0; i < 7; i++)
+				s += new_co[i];
+			new_co[7] = (3 - (s % 3)) % 3;
+
+			MOVE_CO[mi][oidx] = (uint16_t)ori_to_idx(new_co);
+		}
+	}
+}
+
+template <typename TMoveTable>
+static vector<uint8_t> build_pruning(const TMoveTable &move_table, int size)
+{
+	vector<int16_t> dist(size, -1);
+	deque<int> q;
+	dist[0] = 0;
+	q.push_back(0);
+
+	while (!q.empty()) {
+		int x = q.front();
+		q.pop_front();
+		int d = dist[x];
+		for (int mi = 0; mi < (int)MOVES.size(); mi++) {
+			int y = move_table[mi][x];
+			if (dist[y] == -1) {
+				dist[y] = d + 1;
+				q.push_back(y);
+			}
+		}
+	}
+
+	vector<uint8_t> out(size);
+	for (int i = 0; i < size; i++)
+		out[i] = (dist[i] < 0) ? 255 : (uint8_t)dist[i];
+	return out;
+}
+
+static bool load_cache()
+{
+	ifstream in(CACHE_FILE, ios::binary);
+	if (!in)
+		return false;
+
+	uint32_t magic = 0, ver = 0;
+	in.read((char *)&magic, 4);
+	in.read((char *)&ver, 4);
+	if (magic != 0x32583232u || ver != 1)
+		return false;
+
+	MOVE_CP.assign(MOVES.size(), {});
+	MOVE_CO.assign(MOVES.size(), {});
+	DIST_CP.resize(40320);
+	DIST_CO.resize(2187);
+
+	for (int mi = 0; mi < (int)MOVES.size(); mi++)
+		in.read((char *)MOVE_CP[mi].data(), 40320 * sizeof(uint16_t));
+	for (int mi = 0; mi < (int)MOVES.size(); mi++)
+		in.read((char *)MOVE_CO[mi].data(), 2187 * sizeof(uint16_t));
+	in.read((char *)DIST_CP.data(), 40320 * sizeof(uint8_t));
+	in.read((char *)DIST_CO.data(), 2187 * sizeof(uint8_t));
+
+	return (bool)in;
+}
+
+static void save_cache()
+{
+	ofstream out(CACHE_FILE, ios::binary);
+	uint32_t magic = 0x32583232u, ver = 1;
+	out.write((char *)&magic, 4);
+	out.write((char *)&ver, 4);
+
+	for (int mi = 0; mi < (int)MOVES.size(); mi++)
+		out.write((char *)MOVE_CP[mi].data(), 40320 * sizeof(uint16_t));
+	for (int mi = 0; mi < (int)MOVES.size(); mi++)
+		out.write((char *)MOVE_CO[mi].data(), 2187 * sizeof(uint16_t));
+	out.write((char *)DIST_CP.data(), 40320 * sizeof(uint8_t));
+	out.write((char *)DIST_CO.data(), 2187 * sizeof(uint8_t));
+}
+
+static inline bool is_in_cubie(int cubie_id, char v)
+{
+	auto &b = CUBIES[cubie_id];
+	return b[0] == v || b[1] == v || b[2] == v;
+}
+
+// Reconstruct cp/co from 5 faces (unknown facelets are missing)
+static pair<array<int, 8>, array<int, 8> > reconstruct_from_5faces(
+	const unordered_map<char, array<array<char, 2>, 2> > &partial)
+{
+	auto get_facelet = [&](char face, RC rc) -> optional<char> {
+		auto it = partial.find(face);
+		if (it == partial.end())
+			return nullopt;
+		return it->second[rc.r][rc.c];
+	};
+
+	array<bool, 8> used{};
+	used.fill(false);
+	array<int, 8> cp{};
+	cp.fill(-1);
+	array<int, 8> co{};
+	co.fill(0);
+
+	array<array<optional<char>, 3>, 8> need;
+	array<vector<int>, 8> cands;
+
+	// Build candidate cubies for each position
+	for (int pos = 0; pos < 8; pos++) {
+		array<char, 3> seen{};
+		int sc = 0;
+		for (int i = 0; i < 3; i++) {
+			char face = CORNER_FACES[pos][i];
+			RC rc = CORNER_FACELETS[pos].at(face);
+			auto v = get_facelet(face, rc);
+			need[pos][i] = v;
+			if (v.has_value())
+				seen[sc++] = *v;
+		}
+
+		vector<int> possible;
+		for (int cub = 0; cub < 8; cub++) {
+			bool ok = true;
+			for (int k = 0; k < sc; k++) {
+				if (!is_in_cubie(cub, seen[k])) {
+					ok = false;
+					break;
+				}
+			}
+			if (ok)
+				possible.push_back(cub);
+		}
+		cands[pos] = std::move(possible);
+	}
+
+	// Most constrained first
+	vector<int> order(8);
+	iota(order.begin(), order.end(), 0);
+	sort(order.begin(), order.end(), [&](int a, int b) {
+		int ca = (int)cands[a].size(), cb = (int)cands[b].size();
+		int na = 0, nb = 0;
+		for (int i = 0; i < 3; i++) {
+			if (!need[a][i].has_value())
+				na++;
+			if (!need[b][i].has_value())
+				nb++;
+		}
+		if (ca != cb)
+			return ca < cb;
+		return na < nb;
+	});
+
+	// twist definition matches Python:
+	// twist = index in (U/R/F) order where U/D color sits
+	auto colors_with_twist = [&](int cub, int twist) -> array<char, 3> {
+		auto base = CUBIES[cub];
+		int k = (3 - (twist % 3)) % 3;
+		return { base[k], base[(k + 1) % 3], base[(k + 2) % 3] };
+	};
+
+	auto fits = [&](int pos, int cub, int twist) -> bool {
+		auto cols = colors_with_twist(cub, twist);
+		for (int i = 0; i < 3; i++) {
+			if (need[pos][i].has_value() &&
+			    *need[pos][i] != cols[i])
+				return false;
+		}
+		return true;
+	};
+
+	function<bool(int)> dfs = [&](int i) -> bool {
+		if (i == 8) {
+			int s = 0;
+			for (int k = 0; k < 8; k++)
+				s += co[k];
+			return (s % 3) == 0;
+		}
+		int pos = order[i];
+		for (int cub : cands[pos]) {
+			if (used[cub])
+				continue;
+			for (int twist = 0; twist < 3; twist++) {
+				if (!fits(pos, cub, twist))
+					continue;
+				used[cub] = true;
+				cp[pos] = cub;
+				co[pos] = twist;
+				if (dfs(i + 1))
+					return true;
+				used[cub] = false;
+				cp[pos] = -1;
+				co[pos] = 0;
+			}
+		}
+		return false;
+	};
+
+	if (!dfs(0))
+		throw runtime_error("reconstruct failed (mapping mismatch?)");
+
+	// Fix last twist parity
+	int s = 0;
+	for (int i = 0; i < 7; i++)
+		s += co[i];
+	co[7] = (3 - (s % 3)) % 3;
+	return { cp, co };
+}
+
+// IDA* with pruning tables (max depth 11)
+static string ida_solve(const array<int, 8> &cp, const array<int, 8> &co,
+			int max_depth = 11)
+{
+	int cp_idx = perm_to_idx(cp);
+	int co_idx = ori_to_idx(co);
+
+	auto h = [&](int cpi, int coi) -> int {
+		int dcp = (DIST_CP[cpi] == 255) ? 99 : DIST_CP[cpi];
+		int dco = (DIST_CO[coi] == 255) ? 99 : DIST_CO[coi];
+		return max({ dcp, dco, (dcp + dco) / 2 });
+	};
+
+	int bound = h(cp_idx, co_idx);
+	vector<string> path;
+	path.reserve(max_depth);
+
+	function<int(int, int, int, int, int, string *)> dfs =
+		[&](int cpi, int coi, int g, int bound, int last_face_idx,
+		    string *last_move) -> int {
+		int f = g + h(cpi, coi);
+		if (f > bound)
+			return f;
+		if (cpi == 0 && coi == 0)
+			return -1; // solved
+		if (g == bound)
+			return INT_MAX;
+
+		int min_next = INT_MAX;
+		for (int fi = 0; fi < 6; fi++) {
+			if (last_face_idx != -1 && fi == last_face_idx)
+				continue;
+			for (int k = 0; k < 3; k++) {
+				int mi = MOVES_BY_FACE_IDX[fi][k];
+				const string &m = MOVES[mi];
+				if (last_move && is_inverse(*last_move, m))
+					continue;
+
+				int ncpi = MOVE_CP[mi][cpi];
+				int ncoi = MOVE_CO[mi][coi];
+
+				path.push_back(m);
+				string cur = m;
+				int res =
+					dfs(ncpi, ncoi, g + 1, bound, fi, &cur);
+				if (res == -1)
+					return -1;
+				path.pop_back();
+				if (res < min_next)
+					min_next = res;
+			}
+		}
+		return min_next;
+	};
+
+	while (bound <= max_depth) {
+		int res = dfs(cp_idx, co_idx, 0, bound, -1, nullptr);
+		if (res == -1) {
+			string out;
+			for (size_t i = 0; i < path.size(); i++) {
+				if (i)
+					out.push_back(' ');
+				out += path[i];
+			}
+			return out;
+		}
+		if (res == INT_MAX)
+			break;
+		bound++;
+	}
+	return "";
+}
+
+// main: load/build tables once, then serve queries using BEGIN/END protocol
+int main()
+{
+	ios::sync_with_stdio(false);
+	cin.tie(nullptr);
+
+	if (!load_cache()) {
+		build_corner_move_tables();
+		DIST_CP = build_pruning(MOVE_CP, 40320);
+		DIST_CO = build_pruning(MOVE_CO, 2187);
+		save_cache();
+	}
+
+	string tok;
+	while (cin >> tok) {
+		if (tok != "BEGIN") {
+			// ignore any garbage (robust for piping)
+			continue;
+		}
+
+		unordered_map<char, array<array<char, 2>, 2> > partial;
+
+		// read face lines until END
+		while (cin >> tok) {
+			if (tok == "END")
+				break;
+			if (tok.size() != 1)
+				throw runtime_error("bad face token");
+			char face = tok[0];
+
+			string a, b, c, d;
+			cin >> a >> b >> c >> d;
+
+			array<array<char, 2>, 2> mat{};
+			mat[0][0] = a[0];
+			mat[0][1] = b[0];
+			mat[1][0] = c[0];
+			mat[1][1] = d[0];
+			partial[face] = mat;
+		}
+
+		auto [cp, co] = reconstruct_from_5faces(partial);
+		string sol = ida_solve(cp, co, 11);
+		if (sol.empty())
+			sol = "U";
+		cout << sol << "\n" << flush;
+	}
+	return 0;
+}
 ```
 
-注意：服务端会随机隐藏一个面，但 solver 不要求你补齐 6 面；它接受“任意顺序的 5 个面”，缺失面自然当作 unknown。
-
-### 为什么要做 fallback
-
-正常情况下 IDA* 一定会在 ≤11 内找到解；但为了让管道协议更鲁棒（例如某轮输入解析出错导致 solver 输出空行），脚本做了：
-
-- `if not sol: sol = "U"`
-
-至少保证不会因为发送空行卡住交互。
-
-### 日志与性能
-
-每轮打印一次 `sol_len` 和耗时（ms），方便发现缓存没命中或 solver 退化。
-
-如果远程交互对输出敏感，可以把 `context.log_level` 调低，减少 I/O。
-
----
-
----
-
-## 常见踩坑清单
-
-1. **坐标对齐**：`CORNER_FACELETS` 的 (r,c) 必须与服务端打印完全一致；错一格就会导致重建失败或状态错误。
-2. **twist 定义统一**：`co[pos]` 的含义必须与 `twist_of_corner()`、move table 的 twist delta 一致；不一致会出现“重建能过、但解永远不对”。
-3. **perm24 方向别写反**：明确 `new[i]=old[perm[i]]`，否则 corner 置换推导会错。
-4. **隐藏面导致的歧义**：如果你自己重写重建器，要记得做全局 DFS（只靠局部集合过滤不够）。
-5. **别每轮重启 solver**：否则会被进程启动/表生成拖慢。
-
----
-
----
-
-## 一句话总结
-
-把 2x2 用 corner `(cp,co)` 建模；从 5 面通过约束搜索恢复状态；预计算 move/pruning table；用 IDA* 在深度 ≤ 11 内求解并自动化交互，即可稳定 100 轮拿 flag。
+可能偶尔运气差还是会超时，多试几次即可，出题人设备为 MacBookAir M3 和拯救者R9000P 2023，测试均能通过远程。
