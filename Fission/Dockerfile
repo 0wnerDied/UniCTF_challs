@@ -1,32 +1,35 @@
 # syntax=docker/dockerfile:1
 
 # Build stage
-FROM ubuntu:25.10 AS build
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
+FROM archlinux:latest AS build
+RUN pacman -Syu --noconfirm && \
+    pacman -S --noconfirm \
     clang lld make ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-# Fix missing CFI ignorelist
-RUN mkdir -p /usr/lib/llvm-20/lib/clang/20/share && \
-    touch /usr/lib/llvm-20/lib/clang/20/share/cfi_ignorelist.txt
+    && pacman -Scc --noconfirm && \
+    rm -rf /var/cache/pacman/pkg/*
 WORKDIR /src
 COPY Makefile vuln.c ./
 RUN make
 
 # Runtime stage
-FROM ubuntu:25.10
-ENV DEBIAN_FRONTEND=noninteractive
+FROM archlinux:latest
 
-# Install socat for TCP service and tini as init
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    socat ca-certificates tini \
-    && rm -rf /var/lib/apt/lists/*
+# Install socat for TCP service
+RUN pacman -Syu --noconfirm && \
+    pacman -S --noconfirm \
+    socat ca-certificates \
+    && pacman -Scc --noconfirm && \
+    rm -rf /var/cache/pacman/pkg/*
+
+ADD https://github.com/krallin/tini/releases/download/v0.19.0/tini-static /usr/bin/tini
+RUN chmod +x /usr/bin/tini
 
 # Create user and directories
 RUN userdel -r $(getent passwd 1000 | cut -d: -f1) 2>/dev/null || true \
     && useradd -m -u 1000 -s /usr/sbin/nologin ctf \
     && mkdir -p /home/ctf \
-    && chown -R root:ctf /home/ctf
+    && chown -R root:ctf /home/ctf \
+    && chmod 750 /home/ctf
 
 # Copy binary
 COPY --from=build /src/vuln /home/ctf/vuln

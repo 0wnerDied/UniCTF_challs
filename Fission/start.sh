@@ -24,7 +24,7 @@ unset flag
 # Resource limits (best-effort)
 ulimit -c 0
 ulimit -v 1048576 2>/dev/null || true # 1GB virtual memory
-ulimit -u 256 2>/dev/null || true     # max user processes
+ulimit -u 1024 2>/dev/null || true     # max user processes
 
 # Drop to user and start service via socat on 0.0.0.0:9999
 cd /home/ctf
