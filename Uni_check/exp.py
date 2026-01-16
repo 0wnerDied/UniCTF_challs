@@ -19,7 +19,9 @@ payload = f"GET / HTTP/1.1\r\nHost: {target_host}\r\nCookie: session={filename}\
 r.send(payload.encode())
 r.recvuntil(b"\r\n\r\n", timeout=2)
 
-payload = f"GET /check HTTP/1.1\r\nHost: {target_host}\r\nCookie: session={cookie}\r\n\r\n"
+payload = (
+    f"GET /check HTTP/1.1\r\nHost: {target_host}\r\nCookie: session={cookie}\r\n\r\n"
+)
 r.send(payload.encode())
 try:
     r.recv(timeout=2)
