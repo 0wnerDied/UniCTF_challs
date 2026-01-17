@@ -558,7 +558,7 @@ binsh  = printf + ("/bin/sh" - printf)
 ### 3) SSA 传值到新块
 
 如果直接在同一块做 `call`，会遇到 SSA “定义一次”与可见性限制。
-必须 `br` 到新块，然后通过 `phi` 把 `system` 和 `/bin/sh` 传进来，`phi` 是可以从同一个块复杂值进来的：
+必须 `br` 到新块，然后通过 `phi` 把 `system` 和 `/bin/sh` 传进来，`phi` 是可以从同一个块复制值进来的：
 
 ```
 phi r_sys [sys, entry] [sys, entry]
