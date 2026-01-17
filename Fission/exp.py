@@ -115,7 +115,7 @@ def build_chain(buf_addr, path_addr):
     return flat(
         [
             pop_rdi,
-            0xFFFFFFFFFFFFFF9C,  # AT_FDCWD
+            constants.AT_FDCWD,
             pop_rsi,
             path_addr,
             pop_rax,
