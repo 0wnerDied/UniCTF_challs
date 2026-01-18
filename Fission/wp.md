@@ -44,9 +44,7 @@
  0015: 0x06 0x00 0x00 0x7fff0000  return ALLOW
  0016: 0x15 0x00 0x01 0x0000000f  if (A != rt_sigreturn) goto 0018
  0017: 0x06 0x00 0x00 0x7fff0000  return ALLOW
- 0018: 0x15 0x00 0x01 0x0000009e  if (A != arch_prctl) goto 0020
- 0019: 0x06 0x00 0x00 0x7fff0000  return ALLOW
- 0020: 0x06 0x00 0x00 0x80000000  return KILL_PROCESS
+ 0018: 0x06 0x00 0x00 0x80000000  return KILL_PROCESS
 ```
 
 只允许上面白名单中的几个系统调用，所以只能打 ORW。
@@ -58,73 +56,73 @@
 可以看到反编译后的程序非常精简，设置 seccomp，给出 `stdio` 地址，读取任意写的地址和大小，然后任意写，最后调用 `fork` 后立即通过系统调用退出：
 
 ```c
-__int64 __fastcall main(int a1, char **a2, char **a3)
+void __fastcall __noreturn main(int a1, char **a2, char **a3)
 {
-  int n22; // edi
-  int n2; // esi
-  int v5; // ecx
-  int v6; // r8d
-  int v7; // r9d
-  unsigned __int64 i; // r12
-  __int64 chk; // rbx
-  unsigned __int64 j_1; // r15
-  __int64 v11; // r12
-  unsigned __int64 j; // rbp
-  ssize_t v13; // rbx
-  __int16 n21; // [rsp+0h] [rbp-F8h] BYREF
-  int v16; // [rsp+2h] [rbp-F6h]
-  __int16 v17; // [rsp+6h] [rbp-F2h]
-  _QWORD *dest_1; // [rsp+8h] [rbp-F0h]
-  _QWORD dest[29]; // [rsp+10h] [rbp-E8h] BYREF
+  int v3; // ecx
+  int v4; // r8d
+  int v5; // r9d
+  unsigned __int64 n0xF; // rbx
+  __int64 chk; // rax
+  unsigned __int64 v8; // rbx
+  __int64 v9; // r14
+  unsigned __int64 v10; // r15
+  ssize_t v11; // rax
+  __int16 n19; // [rsp+0h] [rbp-C8h] BYREF
+  int v13; // [rsp+2h] [rbp-C6h]
+  __int16 v14; // [rsp+6h] [rbp-C2h]
+  _QWORD *dest_1; // [rsp+8h] [rbp-C0h]
+  _QWORD dest[23]; // [rsp+10h] [rbp-B8h] BYREF
 
-  dest[22] = __readfsqword(0x28u);
   setvbuf(stdin, 0, 2, 0);
   setvbuf(stdout, 0, 2, 0);
   setvbuf(stderr, 0, 2, 0);
-  memcpy(dest, &src_, 0xA8u);
-  n21 = 21;
-  v16 = 0;
-  v17 = 0;
+  memcpy(dest, " ", 0x98u);
+  n19 = 19;
+  v13 = 0;
+  v14 = 0;
   dest_1 = dest;
-  if ( prctl(38, 1, 0, 0, 0) )
-    syscall(60, 0);
-  n22 = 22;
-  n2 = 2;
-  if ( prctl(22, 2, &n21) )
+  if ( !prctl(38, 1, 0, 0, 0) && !prctl(22, 2, &n19) )
   {
-    n22 = 60;
-    n2 = 0;
-    syscall(60, 0);
-  }
-  sub_1D60(n22, n2, (_DWORD)stdin, v5, v6, v7, n21);
-  for ( i = 0; i < 0x10; i += chk )
-  {
-    chk = _read_chk(0, (char *)dest + i, 16 - i);
-    if ( chk <= 0 )
-      syscall(60, 0);
-  }
-  j_1 = dest[1];
-  if ( dest[1] >= 0x65u )
-  {
-    syscall(60, 0);
-    j_1 = dest[1];
-  }
-  if ( j_1 )
-  {
-    v11 = dest[0];
-    for ( j = 0; j < j_1; j += v13 )
+    n0xF = 0;
+    sub_1C50(22, 2, (_DWORD)stdin, v3, v4, v5, n19);
+    do
     {
-      v13 = read(0, (void *)(v11 + j), j_1 - j);
-      if ( v13 <= 0 )
-        syscall(60, 0);
+      chk = _read_chk(0, (char *)dest + n0xF, 16 - n0xF);
+      if ( chk <= 0 )
+        goto LABEL_12;
+      n0xF += chk;
+    }
+    while ( n0xF <= 0xF );
+    v8 = dest[1];
+    if ( dest[1] < 0x65u )
+    {
+      if ( dest[1] )
+      {
+        v9 = dest[0];
+        v10 = 0;
+        while ( 1 )
+        {
+          v11 = read(0, (void *)(v9 + v10), v8 - v10);
+          if ( v11 <= 0 )
+            break;
+          v10 += v11;
+          if ( v10 >= v8 )
+            goto LABEL_11;
+        }
+      }
+      else
+      {
+LABEL_11:
+        fork();
+      }
     }
   }
-  fork();
+LABEL_12:
   syscall(60, 0);
-  return 0;
+  JUMPOUT(0x1C41);
 }
 
-unsigned __int64 sub_1D60(int n22, int n2, ...)
+unsigned __int64 sub_1C50(int n22, int n2, ...)
 {
   gcc_va_list va; // [rsp+B0h] [rbp-28h] BYREF
   unsigned __int64 v5; // [rsp+D0h] [rbp-8h]
