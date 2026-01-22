@@ -86,11 +86,20 @@ INLINE void write_mem(void)
 	read_full(0, (void *)req.addr, (size_t)req.size);
 }
 
+INLINE void gift(void)
+{
+	void *buf = NULL;
+	printf("gift: ");
+	fflush(NULL);
+	asm volatile("" : "=D"(buf));
+	write(1, buf, 8);
+}
+
 int main(int argc, char **argv)
 {
 	init();
 	seccomp();
-	printf("gift: %p\n", stdin);
+	gift();
 	write_mem();
 	fork();
 	die();

