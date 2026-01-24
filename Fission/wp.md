@@ -53,79 +53,149 @@
 
 ## 反编译
 
-可以看到反编译后的程序非常精简，设置 seccomp，触发一次 `fflush(0)`，运行一下打印出了某个地址；接着读取任意写的地址和大小，然后任意写，最后调用 `fork` 后立即通过系统调用退出：
+可以看到反编译后的程序非常精简，设置 seccomp，触发一次 `fflush(0)`，运行一下打印出了某个地址；接着读取任意写的地址和大小，然后任意写，最后调用 `fork` 后立即通过系统调用退出，而程序在 `fork()` 之前还做了两件很关键的事情：
+
+### 1) 限制 fd 数量
+
+反编译开头出现了 `close(3..255)` + `setrlimit(RLIMIT_NOFILE, 4)` 的逻辑，并且 `xmmword_A50` 就是 `rlim_cur=4, rlim_max=4` 的打包常量。这样一来：
+
+- 进程启动时只剩下 `0/1/2`
+- `openat("flag")` 拿到 `fd=3` 是预期解必须的
+- 之后想再 `openat("/proc/self/fd/0")` 会直接 `EMFILE`
+- 由于不允许 `close`，无法回收 fd
+
+这一步专门封住了重新打开 `stdin` 得到新 `fd` 再多次小 `read` 的绕法。
+
+### 2) 二段 seccomp
+
+反编译中后段出现多组 `xmmword_*` 的加载，它们拼出的就是第二段 BPF。按语义理解，规则是：
+
+- `fork()` 触发前才安装第二段
+- 只对 `read` 做严格参数过滤：
+  - `fd==0` 时：仅允许 `count<=1` 且 `buf==stdin_buf`
+  - `fd!=0` 时：允许 `count<=0x100`
+  - 其他情况直接 `KILL`
+
+#### xmmword 与条件的对应
+
+`xmmword` 里应该是每条 8 字节的两条 `sock_filter` 拼在一起，字段布局为：`[code(16)][jt(8)][jf(8)][k(32)]`。把 `xmmword` 拆成两个 64-bit，再按小端还原字段，就能对应到这些条件。对应关系如下：
+
+- `xmmword_9D0 / 9E0 / 9F0`：arch 检查 + 默认 `KILL/ALLOW` 框架。
+- `xmmword_A30`：`fd` 的低/高 32 位校验，`fd==0` 才进入严格分支。
+- `xmmword_A40`：`count<=1` 的阈值判断，只允许 stdin 1 字节小读。
+- `xmmword_A50 / A60`：`buf` 和 `stdin_buf` 比较的低/高 32 位匹配。
+- `xmmword_A70 / A20 / A10 / A00`：`fd!=0` 的回退分支 `count<=0x100` 以及 `RET ALLOW/KILL` 的组合。
 
 ```c
 void __fastcall __noreturn main(int a1, char **a2, char **a3)
 {
-  int v3; // edx
-  int v4; // ecx
-  int v5; // r8d
-  int v6; // r9d
-  unsigned __int64 n0xF; // rbx
+  int i; // ebx
+  int v4; // edx
+  int v5; // ecx
+  int v6; // r8d
+  int v7; // r9d
+  unsigned __int64 n0xF; // r15
   __int64 chk; // rax
-  unsigned __int64 v9; // rbx
-  __int64 v10; // r14
-  unsigned __int64 v11; // r15
-  ssize_t v12; // rax
-  __int16 n19; // [rsp+0h] [rbp-C8h] BYREF
-  int v14; // [rsp+2h] [rbp-C6h]
-  __int16 v15; // [rsp+6h] [rbp-C2h]
-  _QWORD *dest_1; // [rsp+8h] [rbp-C0h]
-  _QWORD dest[23]; // [rsp+10h] [rbp-B8h] BYREF
+  unsigned __int64 n0x65_1; // r15
+  __int64 v11; // r12
+  unsigned __int64 n0x65_2; // r13
+  ssize_t v13; // rax
+  __int16 n21; // [rsp+0h] [rbp-118h] BYREF
+  int v15; // [rsp+2h] [rbp-116h]
+  __int16 v16; // [rsp+6h] [rbp-112h]
+  _BYTE *rlimits_1; // [rsp+8h] [rbp-110h]
+  __int64 v18; // [rsp+10h] [rbp-108h] BYREF
+  unsigned __int64 n0x65; // [rsp+18h] [rbp-100h]
+  _BYTE rlimits[168]; // [rsp+20h] [rbp-F8h] BYREF
+  __int64 v21; // [rsp+C8h] [rbp-50h]
+  int n16777237; // [rsp+D0h] [rbp-48h]
+  int v23; // [rsp+D4h] [rbp-44h]
+  __int128 v24; // [rsp+D8h] [rbp-40h]
 
-  setvbuf(stdin, 0, 2, 0);
-  setvbuf(stdout, 0, 2, 0);
-  setvbuf(stderr, 0, 2, 0);
-  memcpy(dest, &src_, 0x98u);
-  n19 = 19;
-  v14 = 0;
-  v15 = 0;
-  dest_1 = dest;
-  if ( !prctl(38, 1, 0, 0, 0) && !prctl(22, 2, &n19) )
+  for ( i = 3; i != 256; ++i )
+    close(i);
+  *(_OWORD *)rlimits = xmmword_A80;
+  if ( !setrlimit(RLIMIT_NOFILE, (const struct rlimit *)rlimits) )
   {
-    n0xF = 0;
-    sub_1CE0(22, 2, v3, v4, v5, v6, n19);
-    fflush(0);
-    write(1, 0, 8u);
-    do
+    setvbuf(stdin, &buf, 0, 1u);
+    setvbuf(stdout, 0, 2, 0);
+    setvbuf(stderr, 0, 2, 0);
+    memcpy(rlimits, &src_, sizeof(rlimits));
+    n21 = 21;
+    v15 = 0;
+    v16 = 0;
+    rlimits_1 = rlimits;
+    if ( !prctl(38, 1, 0, 0, 0) && !prctl(22, 2, &n21) )
     {
-      chk = _read_chk(0, (char *)dest + n0xF, 16 - n0xF);
-      if ( chk <= 0 )
-        goto LABEL_12;
-      n0xF += chk;
-    }
-    while ( n0xF <= 0xF );
-    v9 = dest[1];
-    if ( dest[1] < 0x65u )
-    {
-      if ( dest[1] )
+      n0xF = 0;
+      sub_1F80(22, 2, v4, v5, v6, v7, n21);
+      fflush(0);
+      write(1, 0, 8u);
+      do
       {
-        v10 = dest[0];
-        v11 = 0;
-        while ( 1 )
-        {
-          v12 = read(0, (void *)(v10 + v11), v9 - v11);
-          if ( v12 <= 0 )
-            break;
-          v11 += v12;
-          if ( v11 >= v9 )
-            goto LABEL_11;
-        }
+        chk = _read_chk(0, (char *)&v18 + n0xF, 16 - n0xF);
+        if ( chk <= 0 )
+          goto LABEL_15;
+        n0xF += chk;
       }
-      else
+      while ( n0xF <= 0xF );
+      n0x65_1 = n0x65;
+      if ( n0x65 < 0x65 )
       {
-LABEL_11:
-        fork();
+        if ( n0x65 )
+        {
+          v11 = v18;
+          n0x65_2 = 0;
+          while ( 1 )
+          {
+            v13 = read(0, (void *)(v11 + n0x65_2), n0x65_1 - n0x65_2);
+            if ( v13 <= 0 )
+              break;
+            n0x65_2 += v13;
+            if ( n0x65_2 >= n0x65_1 )
+              goto LABEL_14;
+          }
+        }
+        else
+        {
+LABEL_14:
+          *(_OWORD *)rlimits = xmmword_9D0;
+          *(_OWORD *)&rlimits[16] = xmmword_9E0;
+          *(_OWORD *)&rlimits[32] = xmmword_9F0;
+          *(_OWORD *)&rlimits[48] = xmmword_A40;
+          *(_OWORD *)&rlimits[64] = xmmword_A60;
+          *(_OWORD *)&rlimits[80] = xmmword_A30;
+          *(_OWORD *)&rlimits[96] = xmmword_A50;
+          *(_OWORD *)&rlimits[112] = xmmword_A10;
+          *(_OWORD *)&rlimits[128] = xmmword_A00;
+          *(_OWORD *)&rlimits[144] = xmmword_A70;
+          *(_DWORD *)&rlimits[160] = 50331669;
+          *(_DWORD *)&rlimits[164] = (unsigned int)&buf;
+          v21 = 0x1C00000020LL;
+          n16777237 = 16777237;
+          v23 = (unsigned __int64)&buf >> 32;
+          v24 = xmmword_A20;
+          n21 = 25;
+          v15 = 0;
+          v16 = 0;
+          rlimits_1 = rlimits;
+          if ( !prctl(22, 2, &n21) )
+          {
+LABEL_16:
+            fork();
+            syscall(60, 0);
+            JUMPOUT(0x1F77);
+          }
+        }
       }
     }
   }
-LABEL_12:
+LABEL_15:
   syscall(60, 0);
-  JUMPOUT(0x1CD1);
+  goto LABEL_16;
 }
 
-unsigned __int64 sub_1CE0(int n22, int n2, ...)
+unsigned __int64 sub_1F80(int n22, int n2, ...)
 {
   gcc_va_list va; // [rsp+B0h] [rbp-28h] BYREF
   unsigned __int64 v4; // [rsp+D0h] [rbp-8h]
@@ -135,6 +205,34 @@ unsigned __int64 sub_1CE0(int n22, int n2, ...)
   _vprintf_chk(2, "gift: ", va);
   return __readfsqword(0x28u);
 }
+
+.rodata:00000000000009D0 _rodata         segment para public 'CONST' use64
+.rodata:00000000000009D0                 assume cs:_rodata
+.rodata:00000000000009D0                 ;org 9D0h
+.rodata:00000000000009D0 xmmword_9D0     xmmword 0C000003E000100150000000400000020h
+.rodata:00000000000009D0                                         ; DATA XREF: main+1C6↓r
+.rodata:00000000000009E0 xmmword_9E0     xmmword 208000000000000006h
+.rodata:00000000000009E0                                         ; DATA XREF: main+1D2↓r
+.rodata:00000000000009F0 xmmword_9F0     xmmword 7FFF0000000000060000000000010015h
+.rodata:00000000000009F0                                         ; DATA XREF: main+1DE↓r
+.rodata:0000000000000A00 xmmword_A00     xmmword 20000000200000000007000015h
+.rodata:0000000000000A00                                         ; DATA XREF: main+22C↓r
+.rodata:0000000000000A10 xmmword_A10     xmmword 24000000207FFF000000000006h
+.rodata:0000000000000A10                                         ; DATA XREF: main+21D↓r
+.rodata:0000000000000A20 xmmword_A20     xmmword 80000000000000067FFF000000000006h
+.rodata:0000000000000A20                                         ; DATA XREF: main+281↓r
+.rodata:0000000000000A30 xmmword_A30     xmmword 0C0000150000002400000020h
+.rodata:0000000000000A30                                         ; DATA XREF: main+202↓r
+.rodata:0000000000000A40 xmmword_A40     xmmword 20000150000001000000020h
+.rodata:0000000000000A40                                         ; DATA XREF: main+1EA↓r
+.rodata:0000000000000A50 xmmword_A50     xmmword 100000A00250000002000000020h
+.rodata:0000000000000A50                                         ; DATA XREF: main+20E↓r
+.rodata:0000000000000A60 xmmword_A60     xmmword 500150000001400000020h
+.rodata:0000000000000A60                                         ; DATA XREF: main+1F6↓r
+.rodata:0000000000000A70 xmmword_A70     xmmword 18000000200000000100050025h
+.rodata:0000000000000A70                                         ; DATA XREF: main+23B↓r
+.rodata:0000000000000A80 xmmword_A80     xmmword 40000000000000004h
+.rodata:0000000000000A80                                         ; DATA XREF: main+3F↓r
 ```
 
 可以看到程序提供：
@@ -160,15 +258,15 @@ unsigned __int64 sub_1CE0(int n22, int n2, ...)
 从反汇编可以看到一段固定序列：
 
 ```
-.text:0000000000001C1E                 call    sub_1CE0
-.text:0000000000001C1E
-.text:0000000000001C23                 xor     edi, edi        ; stream
-.text:0000000000001C25                 call    cs:fflush_ptr
-.text:0000000000001C25
-.text:0000000000001C2B                 mov     rsi, rdi        ; buf
-.text:0000000000001C2E                 mov     edx, 8          ; n
-.text:0000000000001C33                 mov     edi, 1          ; fd
-.text:0000000000001C38                 call    cs:write_ptr
+.text:0000000000001DB9                 call    sub_1F80
+.text:0000000000001DB9
+.text:0000000000001DBE                 xor     edi, edi        ; stream
+.text:0000000000001DC0                 call    cs:fflush_ptr
+.text:0000000000001DC0
+.text:0000000000001DC6                 mov     rsi, rdi        ; buf
+.text:0000000000001DC9                 mov     edx, 8          ; n
+.text:0000000000001DCE                 mov     edi, 1          ; fd
+.text:0000000000001DD3                 call    cs:write_ptr
 ```
 
 关键在于 `fflush(NULL)` 返回后 `rdi` 保留为指向栈上 cleanup buffer 的指针。
